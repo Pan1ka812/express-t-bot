@@ -1,0 +1,3468 @@
+import asyncio
+import html
+import json
+import logging
+import os
+import platform
+import re
+import sqlite3
+import sys
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+from brands_data import BRAND_ALIASES, GENERIC_VEHICLE_WORDS
+
+from aiogram import Bot, Dispatcher, Router, types
+from aiogram.filters import Command, CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import (
+    CallbackQuery,
+    Contact,
+    FSInputFile,
+    InlineKeyboardButton,
+    KeyboardButton,
+    Message,
+    ReplyKeyboardRemove,
+    WebAppInfo,
+)
+from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
+
+# =========================
+# CONFIG
+# =========================
+BOT_TOKEN = os.getenv("BOT_TOKEN", "7394588586:AAF6pqDYoCg7ZkesVT1YbAfiQ_3Cc9ZonTU")
+ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "-4962711861"))
+REVIEWS_CHAT_ID = int(os.getenv("REVIEWS_CHAT_ID", "-5169948092"))
+SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "+380632354243")
+
+BASE_DIR = Path(__file__).resolve().parent
+BANNED_USERS_FILE = BASE_DIR / "banned_users.json"
+DB_PATH = BASE_DIR / "express_t.db"
+MAP_WEBAPP_URL = os.getenv("MAP_WEBAPP_URL", "https://Pan1ka812.github.io/express-t-map/map.html")
+
+logging.basicConfig(level=logging.INFO)
+
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+router = Router()
+dp.include_router(router)
+
+# =========================
+# CONSTANTS
+# =========================
+SERVICE_TYPES = [
+    "Евакуатор",
+    "Гідравлічна платформа",
+    "Кран-маніпулятор",
+    "Вантажні перевезення",
+]
+
+CAR_TYPES = [
+    "Легковий",
+    "Джип",
+    "Мікроавтобус",
+    "Автобус",
+    "Вантажний авто",
+    "Інше",
+]
+
+URGENCY_TYPES = [
+    "На зараз",
+    "На інший день",
+]
+
+PAYER_TYPES = [
+    "Готівка",
+    "БН",
+]
+
+PRICE_CONFIRMATION_TYPES = [
+    "Погоджуюсь",
+    "Відмовляюсь",
+]
+
+LOADING_PHONE_OPTIONS = [
+    "Цей самий номер",
+    "Інший номер",
+]
+
+UNLOADING_PHONE_OPTIONS = [
+    "Цей самий номер",
+    "Номер із завантаження",
+    "Інший номер",
+]
+
+
+REVIEW_REASON_OPTIONS = [
+    "Дорого",
+    "Довго",
+    "Стан авто",
+    "Водій",
+    "Інше",
+]
+
+ADDRESS_HINT_WORDS = {
+    "вул", "вулиця", "ул", "улица", "просп", "проспект", "пр", "пров",
+    "переулок", "пер", "бульвар", "бул", "площа", "пл", "шосе", "дорога",
+    "наб", "набережна", "буд", "дом", "д", "house", "street", "st",
+    "avenue", "ave", "road", "rd", "lane", "ln",
+    "київ", "киев", "львів", "львов", "одеса", "одесса",
+    "дніпро", "днепр", "харків", "харьков",
+}
+
+
+ORDER_STATUS_CREATED = "Створено"
+ORDER_STATUS_PRICE_SENT = "Ціну надіслано"
+ORDER_STATUS_AGREED = "Клієнт погодився"
+ORDER_STATUS_DECLINED = "Клієнт відмовився"
+
+REVIEW_AVAILABLE_STATUSES = {
+    ORDER_STATUS_AGREED,
+}
+
+MANUAL_PHONE_INPUT_TEXT = "✍️ Ввести інший номер вручну"
+
+# =========================
+# FSM
+# =========================
+class Form(StatesGroup):
+    service_type = State()
+    cargo_name = State()
+    custom_cargo_description = State()
+    car_brand_model = State()
+    dimensions = State()
+    weight = State()
+    urgency_type = State()
+    scheduled_date = State()
+    scheduled_time = State()
+    loading_address = State()
+    unloading_address = State()
+    client_phone_input_choice = State()
+    client_phone = State()
+    customer_name = State()
+    loading_phone_choice = State()
+    loading_phone = State()
+    unloading_phone_choice = State()
+    unloading_phone = State()
+    payer_type = State()
+    payer_details = State()
+    comment = State()
+    oversize_support = State()
+    confirmation = State()
+
+
+class ReviewForm(StatesGroup):
+    rating = State()
+    custom_reason = State()
+
+# =========================
+# DATABASE
+# =========================
+def get_conn():
+    return sqlite3.connect(DB_PATH)
+
+
+def init_db():
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        telegram_id INTEGER PRIMARY KEY,
+        telegram_full_name TEXT,
+        telegram_username TEXT,
+        customer_name TEXT,
+        phone TEXT,
+        client_tag TEXT DEFAULT 'Новий клієнт',
+        bonus_percent INTEGER DEFAULT 0,
+        note TEXT DEFAULT '',
+        orders_count INTEGER DEFAULT 0,
+        created_at TEXT
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS orders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        telegram_id INTEGER NOT NULL,
+        customer_name TEXT,
+        service_type TEXT,
+        cargo_name TEXT,
+        custom_cargo_description TEXT,
+        car_brand_model TEXT,
+        dimensions TEXT,
+        weight TEXT,
+        urgency_type TEXT,
+        scheduled_date TEXT,
+        scheduled_time TEXT,
+        loading_address TEXT,
+        unloading_address TEXT,
+        client_phone TEXT,
+        loading_phone TEXT,
+        unloading_phone TEXT,
+        payer_type TEXT,
+        payer_details TEXT,
+        comment TEXT,
+        support_required TEXT,
+        price TEXT,
+        status TEXT,
+        created_at TEXT
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS reviews (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        order_id INTEGER NOT NULL UNIQUE,
+        telegram_id INTEGER NOT NULL,
+        stars INTEGER NOT NULL,
+        reason TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(order_id) REFERENCES orders(id)
+    )
+    """)
+
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_reviews_telegram_id ON reviews(telegram_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_orders_telegram_id ON orders(telegram_id)")
+
+    conn.commit()
+    conn.close()
+
+
+def upsert_user(
+    telegram_id: int,
+    telegram_full_name: str,
+    telegram_username: str,
+    customer_name: Optional[str] = None,
+    phone: Optional[str] = None,
+):
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute(
+        "SELECT telegram_id, customer_name, phone FROM users WHERE telegram_id = ?",
+        (telegram_id,),
+    )
+    row = cur.fetchone()
+
+    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+
+    if row is None:
+        cur.execute("""
+        INSERT INTO users (
+            telegram_id, telegram_full_name, telegram_username, customer_name, phone,
+            client_tag, bonus_percent, note, orders_count, created_at
+        ) VALUES (?, ?, ?, ?, ?, 'Новий клієнт', 0, '', 0, ?)
+        """, (
+            telegram_id,
+            telegram_full_name,
+            telegram_username,
+            customer_name or "",
+            phone or "",
+            now,
+        ))
+    else:
+        current_name = row[1] or ""
+        current_phone = row[2] or ""
+        cur.execute("""
+        UPDATE users
+        SET telegram_full_name = ?, telegram_username = ?, customer_name = ?, phone = ?
+        WHERE telegram_id = ?
+        """, (
+            telegram_full_name,
+            telegram_username,
+            customer_name or current_name,
+            phone or current_phone,
+            telegram_id,
+        ))
+
+    conn.commit()
+    conn.close()
+
+
+def increment_user_orders_count(telegram_id: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET orders_count = COALESCE(orders_count, 0) + 1 WHERE telegram_id = ?",
+        (telegram_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def create_order(telegram_id: int, data: dict) -> int:
+    conn = get_conn()
+    cur = conn.cursor()
+    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+
+    cur.execute("""
+    INSERT INTO orders (
+        telegram_id, customer_name, service_type, cargo_name, custom_cargo_description,
+        car_brand_model, dimensions, weight, urgency_type, scheduled_date, scheduled_time,
+        loading_address, unloading_address, client_phone, loading_phone, unloading_phone,
+        payer_type, payer_details, comment, support_required, price, status, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        telegram_id,
+        data.get("customer_name"),
+        data.get("service_type"),
+        data.get("cargo_name"),
+        data.get("custom_cargo_description"),
+        data.get("car_brand_model"),
+        data.get("dimensions"),
+        data.get("weight"),
+        data.get("urgency_type"),
+        data.get("scheduled_date"),
+        data.get("scheduled_time"),
+        data.get("loading_address"),
+        data.get("unloading_address"),
+        data.get("client_phone"),
+        data.get("loading_phone"),
+        data.get("unloading_phone"),
+        data.get("payer_type"),
+        data.get("payer_details"),
+        data.get("comment"),
+        data.get("support_required"),
+        None,
+        ORDER_STATUS_CREATED,
+        now,
+    ))
+
+    order_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return order_id
+
+
+def update_latest_order_for_user(
+    telegram_id: int,
+    status: Optional[str] = None,
+    price: Optional[str] = None,
+):
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute(
+        "SELECT id FROM orders WHERE telegram_id = ? ORDER BY id DESC LIMIT 1",
+        (telegram_id,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        conn.close()
+        return
+
+    order_id = row[0]
+
+    if status is not None and price is not None:
+        cur.execute(
+            "UPDATE orders SET status = ?, price = ? WHERE id = ?",
+            (status, price, order_id),
+        )
+    elif status is not None:
+        cur.execute("UPDATE orders SET status = ? WHERE id = ?", (status, order_id))
+    elif price is not None:
+        cur.execute("UPDATE orders SET price = ? WHERE id = ?", (price, order_id))
+
+    conn.commit()
+    conn.close()
+
+
+def get_user_profile(telegram_id: int) -> Optional[dict]:
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+    SELECT telegram_id, telegram_full_name, telegram_username, customer_name, phone,
+           client_tag, bonus_percent, note, orders_count, created_at
+    FROM users
+    WHERE telegram_id = ?
+    """, (telegram_id,))
+    row = cur.fetchone()
+    conn.close()
+
+    if row is None:
+        return None
+
+    return {
+        "telegram_id": row[0],
+        "telegram_full_name": row[1],
+        "telegram_username": row[2],
+        "customer_name": row[3],
+        "phone": row[4],
+        "client_tag": row[5],
+        "bonus_percent": row[6],
+        "note": row[7],
+        "orders_count": row[8],
+        "created_at": row[9],
+    }
+
+
+def get_last_orders(telegram_id: int, limit: int = 5) -> list[dict]:
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+    SELECT id, telegram_id, customer_name, service_type, cargo_name, custom_cargo_description,
+           loading_address, unloading_address, price, status, created_at
+    FROM orders
+    WHERE telegram_id = ?
+    ORDER BY id DESC
+    LIMIT ?
+    """, (telegram_id, limit))
+
+    rows = cur.fetchall()
+    conn.close()
+
+    result: list[dict] = []
+    for row in rows:
+        result.append({
+            "id": row[0],
+            "telegram_id": row[1],
+            "customer_name": row[2],
+            "service_type": row[3],
+            "cargo_name": row[4],
+            "custom_cargo_description": row[5],
+            "loading_address": row[6],
+            "unloading_address": row[7],
+            "price": row[8],
+            "status": row[9],
+            "created_at": row[10],
+        })
+    return result
+
+
+def get_order_by_id_for_user(order_id: int, telegram_id: int) -> Optional[dict]:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+    SELECT id, telegram_id, customer_name, service_type, cargo_name, custom_cargo_description,
+           loading_address, unloading_address, price, status, created_at
+    FROM orders
+    WHERE id = ? AND telegram_id = ?
+    LIMIT 1
+    """, (order_id, telegram_id))
+    row = cur.fetchone()
+    conn.close()
+
+    if row is None:
+        return None
+
+    return {
+        "id": row[0],
+        "telegram_id": row[1],
+        "customer_name": row[2],
+        "service_type": row[3],
+        "cargo_name": row[4],
+        "custom_cargo_description": row[5],
+        "loading_address": row[6],
+        "unloading_address": row[7],
+        "price": row[8],
+        "status": row[9],
+        "created_at": row[10],
+    }
+
+
+def get_order_by_id(order_id: int) -> Optional[dict]:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+    SELECT id, telegram_id, customer_name, service_type, cargo_name, custom_cargo_description,
+           loading_address, unloading_address, price, status, created_at
+    FROM orders
+    WHERE id = ?
+    LIMIT 1
+    """, (order_id,))
+    row = cur.fetchone()
+    conn.close()
+
+    if row is None:
+        return None
+
+    return {
+        "id": row[0],
+        "telegram_id": row[1],
+        "customer_name": row[2],
+        "service_type": row[3],
+        "cargo_name": row[4],
+        "custom_cargo_description": row[5],
+        "loading_address": row[6],
+        "unloading_address": row[7],
+        "price": row[8],
+        "status": row[9],
+        "created_at": row[10],
+    }
+
+
+def update_order_status_and_price(order_id: int, status: Optional[str] = None, price: Optional[str] = None):
+    conn = get_conn()
+    cur = conn.cursor()
+
+    if status is not None and price is not None:
+        cur.execute("UPDATE orders SET status = ?, price = ? WHERE id = ?", (status, price, order_id))
+    elif status is not None:
+        cur.execute("UPDATE orders SET status = ? WHERE id = ?", (status, order_id))
+    elif price is not None:
+        cur.execute("UPDATE orders SET price = ? WHERE id = ?", (price, order_id))
+
+    conn.commit()
+    conn.close()
+
+
+def get_pending_price_order(telegram_id: int) -> Optional[dict]:
+    """Повертає замовлення зі статусом 'Ціну надіслано' для конкретного клієнта."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+    SELECT id, telegram_id, customer_name, service_type, status
+    FROM orders
+    WHERE telegram_id = ? AND status = ?
+    ORDER BY id DESC
+    LIMIT 1
+    """, (telegram_id, ORDER_STATUS_PRICE_SENT))
+    row = cur.fetchone()
+    conn.close()
+
+    if row is None:
+        return None
+
+    return {
+        "id": row[0],
+        "telegram_id": row[1],
+        "customer_name": row[2],
+        "service_type": row[3],
+        "status": row[4],
+    }
+
+
+def get_review_by_order_id(order_id: int) -> Optional[dict]:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+    SELECT id, order_id, telegram_id, stars, reason, created_at
+    FROM reviews
+    WHERE order_id = ?
+    LIMIT 1
+    """, (order_id,))
+    row = cur.fetchone()
+    conn.close()
+
+    if row is None:
+        return None
+
+    return {
+        "id": row[0],
+        "order_id": row[1],
+        "telegram_id": row[2],
+        "stars": row[3],
+        "reason": row[4],
+        "created_at": row[5],
+    }
+
+
+def get_reviews_map_for_orders(order_ids: list[int]) -> dict[int, dict]:
+    if not order_ids:
+        return {}
+
+    conn = get_conn()
+    cur = conn.cursor()
+    placeholders = ",".join("?" for _ in order_ids)
+    cur.execute(
+        f"""
+        SELECT id, order_id, telegram_id, stars, reason, created_at
+        FROM reviews
+        WHERE order_id IN ({placeholders})
+        """,
+        order_ids,
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    result: dict[int, dict] = {}
+    for row in rows:
+        result[row[1]] = {
+            "id": row[0],
+            "order_id": row[1],
+            "telegram_id": row[2],
+            "stars": row[3],
+            "reason": row[4],
+            "created_at": row[5],
+        }
+    return result
+
+
+def create_review(order_id: int, telegram_id: int, stars: int, reason: str) -> bool:
+    conn = get_conn()
+    cur = conn.cursor()
+    created_at = datetime.now().strftime("%d.%m.%Y %H:%M")
+
+    try:
+        cur.execute("""
+        INSERT INTO reviews (order_id, telegram_id, stars, reason, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        """, (order_id, telegram_id, stars, reason, created_at))
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+    finally:
+        conn.close()
+
+
+def set_user_bonus(telegram_id: int, bonus_percent: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET bonus_percent = ? WHERE telegram_id = ?",
+        (bonus_percent, telegram_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def set_user_tag(telegram_id: int, client_tag: str):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET client_tag = ? WHERE telegram_id = ?",
+        (client_tag, telegram_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def set_user_note(telegram_id: int, note: str):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET note = ? WHERE telegram_id = ?",
+        (note, telegram_id),
+    )
+    conn.commit()
+    conn.close()
+
+# =========================
+# BAN STORAGE
+# =========================
+def _load_banned_from_file() -> set[int]:
+    if not BANNED_USERS_FILE.exists():
+        return set()
+    try:
+        data = json.loads(BANNED_USERS_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return {int(x) for x in data}
+    except Exception:
+        pass
+    return set()
+
+
+# Кэш банов в памяти — читаем файл только один раз при старте
+_banned_users_cache: set[int] = _load_banned_from_file()
+
+
+def load_banned_users() -> set[int]:
+    return _banned_users_cache
+
+
+def save_banned_users(banned_users: set[int]) -> None:
+    global _banned_users_cache
+    _banned_users_cache = banned_users
+    BANNED_USERS_FILE.write_text(
+        json.dumps(sorted(list(banned_users)), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def is_user_banned(user_id: int) -> bool:
+    return user_id in _banned_users_cache
+
+
+async def deny_if_banned_message(message: Message) -> bool:
+    user = message.from_user
+    if user and is_user_banned(user.id):
+        await message.answer("❌ Доступ до бота обмежено.\nЗверніться до оператора.")
+        return True
+    return False
+
+
+async def deny_if_banned_callback(call: CallbackQuery) -> bool:
+    user = call.from_user
+    if user and is_user_banned(user.id):
+        await call.answer("Доступ до бота обмежено.", show_alert=True)
+        try:
+            await call.message.answer("❌ Доступ до бота обмежено.\nЗверніться до оператора.")
+        except Exception:
+            pass
+        return True
+    return False
+
+# =========================
+# CHAT HELPERS
+# =========================
+def is_private_chat_message(message: Message) -> bool:
+    return message.chat.type == "private"
+
+
+def is_private_chat_callback(call: CallbackQuery) -> bool:
+    return call.message.chat.type == "private"
+
+
+def is_admin_chat_message(message: Message) -> bool:
+    return message.chat.id == ADMIN_CHAT_ID
+
+
+async def deny_if_not_private_message(message: Message) -> bool:
+    return not is_private_chat_message(message)
+
+
+async def deny_if_not_private_callback(call: CallbackQuery) -> bool:
+    return not is_private_chat_callback(call)
+async def replace_callback_message(
+    call: CallbackQuery,
+    text: str,
+    reply_markup=None,
+    parse_mode: str | None = "HTML",
+):
+    try:
+        # Если текущее сообщение — фото
+        if call.message.photo:
+            current_caption = (call.message.caption or "").strip()
+            new_text = (text or "").strip()
+
+            # Caption у Telegram ограничен 1024 символами
+            if len(new_text) <= 1024:
+                if current_caption == new_text:
+                    try:
+                        await call.message.edit_reply_markup(reply_markup=reply_markup)
+                    except Exception:
+                        pass
+                    return
+
+                await call.message.edit_caption(
+                    caption=text,
+                    reply_markup=reply_markup,
+                    parse_mode=parse_mode,
+                )
+                return
+
+            # Если текст слишком длинный для caption — удаляем фото и отправляем обычный текст
+            try:
+                await call.message.delete()
+            except Exception:
+                pass
+
+            await call.message.answer(
+                text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode,
+                disable_web_page_preview=True,
+            )
+            return
+
+        # Если текущее сообщение — обычный текст
+        current_text = (call.message.text or "").strip()
+        new_text = (text or "").strip()
+
+        if current_text == new_text:
+            try:
+                await call.message.edit_reply_markup(reply_markup=reply_markup)
+            except Exception:
+                pass
+            return
+
+        await call.message.edit_text(
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+            disable_web_page_preview=True,
+        )
+
+    except Exception as e:
+        error_text = str(e).lower()
+
+        if (
+            "message is not modified" in error_text
+            or "message to edit not found" in error_text
+            or "message can't be edited" in error_text
+            or "there is no text in the message to edit" in error_text
+            or "there is no caption in the message to edit" in error_text
+        ):
+            return
+
+        logging.exception("replace_callback_message failed")
+
+        try:
+            await call.message.answer(
+                text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode,
+                disable_web_page_preview=True,
+            )
+        except Exception:
+            pass
+            return
+
+            await call.message.edit_text(
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode,
+                disable_web_page_preview=True,
+            )
+
+    except Exception as e:
+        error_text = str(e).lower()
+
+        if (
+            "message is not modified" in error_text
+            or "message to edit not found" in error_text
+            or "message can't be edited" in error_text
+            or "there is no text in the message to edit" in error_text
+            or "there is no caption in the message to edit" in error_text
+        ):
+            return
+
+        logging.exception("replace_callback_message failed")
+        return
+# =========================
+# HELPERS / VALIDATORS
+# =========================
+def safe_text(value: Optional[str], default: str = "-") -> str:
+    if value is None:
+        return default
+    value = str(value).strip()
+    if not value:
+        return default
+    return html.escape(value)
+
+
+def normalize_spaces(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _digits_only(text: str) -> str:
+    return re.sub(r"\D", "", text or "")
+
+
+def _is_consecutive_sequence(text: str) -> bool:
+    if len(text) < 4 or not text.isdigit():
+        return False
+
+    inc = True
+    dec = True
+
+    for i in range(1, len(text)):
+        prev_digit = int(text[i - 1])
+        cur_digit = int(text[i])
+        if cur_digit - prev_digit != 1:
+            inc = False
+        if cur_digit - prev_digit != -1:
+            dec = False
+
+    return inc or dec
+
+
+def is_suspicious_ukrainian_phone(normalized_phone: str) -> bool:
+    digits = _digits_only(normalized_phone)
+
+    if len(digits) != 12 or not digits.startswith("380"):
+        return True
+
+    national = "0" + digits[3:]  # 0XXXXXXXXX
+    subscriber = national[1:]    # XXXXXXXXX
+
+    obvious_fake_numbers = {
+        "0000000000",
+        "0111111111",
+        "0123456789",
+        "0987654321",
+        "0999999999",
+    }
+
+    if national in obvious_fake_numbers:
+        return True
+
+    if len(set(national)) == 1 or len(set(subscriber)) == 1:
+        return True
+
+    digit_counts = {d: national.count(d) for d in set(national)}
+    if digit_counts and max(digit_counts.values()) >= 9:
+        return True
+
+    if _is_consecutive_sequence(national) or _is_consecutive_sequence(subscriber):
+        return True
+
+    repeated_tail_patterns = {
+        "123123123",
+        "321321321",
+        "111111111",
+        "222222222",
+        "333333333",
+        "444444444",
+        "555555555",
+        "666666666",
+        "777777777",
+        "888888888",
+        "999999999",
+        "000000000",
+    }
+    if subscriber in repeated_tail_patterns:
+        return True
+
+    return False
+
+
+def normalize_phone(phone: str) -> Optional[str]:
+    if not phone:
+        return None
+
+    raw = phone.strip()
+    digits = _digits_only(raw)
+
+    if raw.startswith("+"):
+        if not re.fullmatch(r"\+\d{12}", raw.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")):
+            raw_digits = _digits_only(raw)
+            if len(raw_digits) != 12:
+                return None
+
+    normalized = None
+
+    if len(digits) == 10 and digits.startswith("0"):
+        normalized = "+38" + digits
+    elif len(digits) == 12 and digits.startswith("380"):
+        normalized = "+" + digits
+    else:
+        return None
+
+    if not re.fullmatch(r"\+380\d{9}", normalized):
+        return None
+
+    if is_suspicious_ukrainian_phone(normalized):
+        return None
+
+    return normalized
+
+
+def extract_phone_from_contact(contact: Contact) -> Optional[str]:
+    return normalize_phone(contact.phone_number or "")
+
+
+def is_valid_address(address: str) -> bool:
+    if not address:
+        return False
+
+    text = address.strip()
+    lowered = text.lower()
+
+    if len(text) < 8:
+        return False
+
+    if re.fullmatch(r"[\W_]+", text):
+        return False
+
+    meaningful = re.findall(r"[A-Za-zА-Яа-яІіЇїЄє0-9]", text)
+    if len(meaningful) < 6:
+        return False
+
+    has_digit = bool(re.search(r"\d", text))
+    has_hint_word = any(word in lowered for word in ADDRESS_HINT_WORDS)
+
+    if not has_digit and not has_hint_word:
+        return False
+
+    banned_single_words = {
+        "машина", "авто", "дом", "улица", "вулиця", "город", "місто",
+        "киев", "київ", "днепр", "дніпро", "харьков", "харків"
+    }
+
+    if lowered in banned_single_words:
+        return False
+
+    parts = re.findall(r"[A-Za-zА-Яа-яІіЇїЄє0-9]+", lowered)
+    if len(parts) == 1 and not has_digit:
+        return False
+
+    return True
+
+
+def parse_weight(weight_text: str) -> Optional[int]:
+    if not weight_text:
+        return None
+
+    text = weight_text.strip().lower().replace(",", ".")
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(кг|kg|т|тон|тонн)?", text)
+    if not match:
+        return None
+
+    value = float(match.group(1))
+    unit = match.group(2)
+
+    if unit in {"т", "тон", "тонн"}:
+        value *= 1000
+
+    if value <= 0:
+        return None
+
+    return int(value)
+
+
+def normalize_dimensions(dimensions_text: str) -> Optional[str]:
+    if not dimensions_text:
+        return None
+
+    text = dimensions_text.strip().replace("x", "*").replace("X", "*").replace("х", "*").replace("Х", "*")
+    parts = text.split("*")
+
+    if len(parts) != 3:
+        return None
+
+    try:
+        length = float(parts[0].replace(",", "."))
+        width = float(parts[1].replace(",", "."))
+        height = float(parts[2].replace(",", "."))
+    except ValueError:
+        return None
+
+    if length <= 0 or width <= 0 or height <= 0:
+        return None
+
+    return f"{length:g}*{width:g}*{height:g}"
+
+
+def extract_height(dimensions_text: str) -> Optional[float]:
+    normalized = normalize_dimensions(dimensions_text)
+    if not normalized:
+        return None
+    return float(normalized.split("*")[2])
+
+
+def detect_brand_alias(text: str) -> Optional[str]:
+    lowered = normalize_spaces(text.lower())
+    parts = lowered.split(" ")
+
+    if not parts:
+        return None
+
+    first = parts[0]
+    first_two = " ".join(parts[:2]) if len(parts) >= 2 else first
+
+    if first_two in BRAND_ALIASES:
+        return BRAND_ALIASES[first_two]
+
+    if first in BRAND_ALIASES:
+        return BRAND_ALIASES[first]
+
+    return None
+
+
+def is_valid_car_brand_model(text: str) -> bool:
+    if not text:
+        return False
+
+    raw = normalize_spaces(text)
+    lowered = raw.lower()
+
+    if len(raw) < 2 or len(raw) > 60:
+        return False
+
+    if re.fullmatch(r"[\W_]+", raw):
+        return False
+
+    if not re.search(r"[A-Za-zА-Яа-яІіЇїЄє]", raw):
+        return False
+
+    parts = lowered.split()
+    if not parts:
+        return False
+
+    first = parts[0]
+
+    banned_words = set(GENERIC_VEHICLE_WORDS) | {
+        "привіт",
+        "hello",
+        "hi",
+        "test",
+        "тест",
+    }
+
+    if lowered in banned_words or first in banned_words:
+        return False
+
+    brand = detect_brand_alias(raw)
+    if not brand:
+        return False
+
+    if len(parts) == 1:
+        return True
+
+    if len(parts) >= 2 and " ".join(parts[:2]) in BRAND_ALIASES:
+        model_part = " ".join(parts[2:]).strip()
+    else:
+        model_part = " ".join(parts[1:]).strip()
+
+    if not model_part:
+        return True
+
+    return bool(re.search(r"[A-Za-zА-Яа-яІіЇїЄє0-9]", model_part))
+
+def is_valid_customer_name(text: str) -> bool:
+    if not text:
+        return False
+
+    raw = normalize_spaces(text)
+
+    if len(raw) < 2 or len(raw) > 30:
+        return False
+    if not re.search(r"[A-Za-zА-Яа-яІіЇїЄє]", raw):
+        return False
+    if re.fullmatch(r"[\W_0-9]+", raw):
+        return False
+
+    return True
+
+
+def needs_dimensions(service_type: str, cargo_name: str) -> bool:
+    if service_type == "Вантажні перевезення":
+        return True
+    return cargo_name in {"Автобус", "Мікроавтобус", "Вантажний авто", "Інше"}
+
+
+def build_reply_keyboard(options: list[str], adjust: int = 2):
+    kb = ReplyKeyboardBuilder()
+    for item in options:
+        kb.add(KeyboardButton(text=item))
+    kb.adjust(adjust)
+    return kb.as_markup(resize_keyboard=True)
+
+
+def build_address_keyboard(mode: str):
+    kb = ReplyKeyboardBuilder()
+    kb.add(KeyboardButton(
+        text="🗺️ Відкрити карту",
+        web_app=WebAppInfo(url=f"{MAP_WEBAPP_URL}?mode={mode}"),
+    ))
+    kb.adjust(1)
+    return kb.as_markup(resize_keyboard=True)
+
+
+def build_phone_input_keyboard():
+    kb = ReplyKeyboardBuilder()
+    kb.add(KeyboardButton(text="📱 Надіслати мій номер", request_contact=True))
+    kb.add(KeyboardButton(text=MANUAL_PHONE_INPUT_TEXT))
+    kb.adjust(1)
+    return kb.as_markup(resize_keyboard=True, one_time_keyboard=True)
+
+
+def get_main_edit_keyboard():
+    kb = InlineKeyboardBuilder()
+    kb.add(InlineKeyboardButton(text="✏️ Редагувати заявку", callback_data="edit_main"))
+    return kb.as_markup()
+
+
+def get_edit_fields_keyboard():
+    kb = InlineKeyboardBuilder()
+    kb.add(InlineKeyboardButton(text="👤 Як звертатися", callback_data="edit_customer_name"))
+    kb.add(InlineKeyboardButton(text="🚗 Марка/модель авто", callback_data="edit_car_brand_model"))
+    kb.add(InlineKeyboardButton(text="📦 Опис вантажу", callback_data="edit_custom_cargo_description"))
+    kb.add(InlineKeyboardButton(text="📏 Габарити", callback_data="edit_dimensions"))
+    kb.add(InlineKeyboardButton(text="⚖️ Вага", callback_data="edit_weight"))
+    kb.add(InlineKeyboardButton(text="⏰ Терміновість", callback_data="edit_urgency_type"))
+    kb.add(InlineKeyboardButton(text="📍 Адреса завантаження", callback_data="edit_loading_address"))
+    kb.add(InlineKeyboardButton(text="📍 Адреса розвантаження", callback_data="edit_unloading_address"))
+    kb.add(InlineKeyboardButton(text="📞 Тел. замовника", callback_data="edit_client_phone"))
+    kb.add(InlineKeyboardButton(text="📞 Тел. завантаження", callback_data="edit_loading_phone_choice"))
+    kb.add(InlineKeyboardButton(text="📞 Тел. розвантаження", callback_data="edit_unloading_phone_choice"))
+    kb.add(InlineKeyboardButton(text="⬅️ Назад до заявки", callback_data="edit_cancel"))
+    kb.adjust(2)
+    return kb.as_markup()
+
+
+def get_profile_keyboard():
+    kb = InlineKeyboardBuilder()
+    kb.add(InlineKeyboardButton(text="📦 Мої замовлення", callback_data="profile_orders"))
+    kb.add(InlineKeyboardButton(text="🎁 Бонуси", callback_data="profile_bonus"))
+    kb.add(InlineKeyboardButton(text="🚀 Нове замовлення", callback_data="profile_new_order"))
+    kb.add(InlineKeyboardButton(text="📞 Підтримка", callback_data="profile_support"))
+    kb.adjust(2)
+    return kb.as_markup()
+
+def get_history_actions_keyboard():
+    kb = InlineKeyboardBuilder()
+
+    kb.add(
+        InlineKeyboardButton(
+            text="⬅️ Назад до профілю",
+            callback_data="history_back_to_profile",
+        )
+    )
+
+    kb.adjust(1)
+    return kb.as_markup()
+
+def get_review_stars_keyboard(order_id: int):
+    kb = InlineKeyboardBuilder()
+    for stars in range(1, 6):
+        kb.add(
+            InlineKeyboardButton(
+                text="⭐" * stars,
+                callback_data=f"review_stars:{order_id}:{stars}",
+            )
+        )
+    kb.add(InlineKeyboardButton(text="❌ Скасувати", callback_data="review_cancel"))
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def get_review_reasons_keyboard(order_id: int, stars: int):
+    kb = InlineKeyboardBuilder()
+    reason_codes = {
+        "Дорого": "expensive",
+        "Довго": "slow",
+        "Стан авто": "car_state",
+        "Водій": "driver",
+        "Інше": "other",
+    }
+    for reason in REVIEW_REASON_OPTIONS:
+        kb.add(
+            InlineKeyboardButton(
+                text=reason,
+                callback_data=f"review_reason:{order_id}:{stars}:{reason_codes[reason]}",
+            )
+        )
+    kb.add(InlineKeyboardButton(text="❌ Скасувати", callback_data="review_cancel"))
+    kb.adjust(2)
+    return kb.as_markup()
+
+
+def get_order_review_keyboard(order: dict, review: Optional[dict]):
+    kb = InlineKeyboardBuilder()
+
+    if review is not None:
+        kb.add(InlineKeyboardButton(text="✅ Відгук залишено", callback_data="review_done"))
+    elif order.get("status") in REVIEW_AVAILABLE_STATUSES:
+        kb.add(InlineKeyboardButton(text="⭐ Залишити відгук", callback_data=f"review_leave:{order['id']}"))
+    else:
+        kb.add(InlineKeyboardButton(text="⏳ Відгук недоступний", callback_data="review_unavailable"))
+
+    return kb.as_markup()
+
+
+def build_client_summary(data: dict) -> str:
+    cargo_label = safe_text(data.get("cargo_name"))
+    if data.get("cargo_name") == "Інше" and data.get("custom_cargo_description"):
+        cargo_label = f"Інше ({safe_text(data.get('custom_cargo_description'))})"
+
+    lines = [
+        "<b>📋 Ваша заявка на перевезення:</b>",
+        "",
+        f"<b>👤 Як до вас звертатися:</b> {safe_text(data.get('customer_name'))}",
+        f"<b>🚛 Тип послуги:</b> {safe_text(data.get('service_type'))}",
+        f"<b>📦 Вантаж:</b> {cargo_label}",
+    ]
+
+    if data.get("car_brand_model"):
+        lines.append(f"<b>🚗 Марка/модель авто:</b> {safe_text(data.get('car_brand_model'))}")
+
+    if data.get("dimensions"):
+        lines.append(f"<b>📏 Габарити:</b> {safe_text(data.get('dimensions'))}")
+
+    lines.extend([
+        f"<b>⚖️ Вага:</b> {safe_text(data.get('weight'))}",
+        f"<b>⏰ Терміновість:</b> {safe_text(data.get('urgency_type'))}",
+    ])
+
+    if data.get("urgency_type") == "На інший день":
+        lines.append(f"<b>📅 Дата:</b> {safe_text(data.get('scheduled_date'))}")
+        lines.append(f"<b>🕐 Час:</b> {safe_text(data.get('scheduled_time'))}")
+
+    lines.extend([
+        f"<b>📍 Адреса завантаження:</b> {safe_text(data.get('loading_address'))}",
+        f"<b>📍 Адреса розвантаження:</b> {safe_text(data.get('unloading_address'))}",
+        f"<b>📞 Тел. замовника:</b> {safe_text(data.get('client_phone'))}",
+        f"<b>📞 Тел. завантаження:</b> {safe_text(data.get('loading_phone'))}",
+        f"<b>📞 Тел. розвантаження:</b> {safe_text(data.get('unloading_phone'))}",
+    ])
+
+    payer_line = f"<b>💰 Платник:</b> {safe_text(data.get('payer_type'))}"
+    if data.get("payer_type") == "БН" and data.get("payer_details"):
+        payer_line += f" - {safe_text(data.get('payer_details'))}"
+    lines.append(payer_line)
+
+    if data.get("comment"):
+        lines.append(f"<b>📝 Коментар:</b> {safe_text(data.get('comment'))}")
+
+    lines.append("")
+    lines.append("<b>Підтверджуєте заявку?</b>")
+
+    return "\n".join(lines)
+
+
+def build_admin_summary(user: types.User, data: dict, order_id: int) -> str:
+    cargo_label = safe_text(data.get("cargo_name"))
+    if data.get("cargo_name") == "Інше" and data.get("custom_cargo_description"):
+        cargo_label = f"Інше ({safe_text(data.get('custom_cargo_description'))})"
+
+    profile = get_user_profile(user.id)
+    client_tag = profile["client_tag"] if profile else "Новий клієнт"
+    bonus = profile["bonus_percent"] if profile else 0
+    orders_count = profile["orders_count"] if profile else 0
+    note = profile["note"] if profile else ""
+
+    lines = [
+        f"<b>🚨 НОВА ЗАЯВКА #{order_id}</b>",
+        "",
+        f"<b>👤 Клієнт:</b> {safe_text(data.get('customer_name') or user.full_name, 'Не вказано')}",
+        f"<b>🆔 ID:</b> {user.id}",
+        f"<b>📱 Username:</b> @{html.escape(user.username) if user.username else 'немає'}",
+        f"<b>🔗 Посилання:</b> <a href='tg://user?id={user.id}'>Написати клієнту</a>",
+        f"<b>⭐ Статус клієнта:</b> {safe_text(client_tag)}",
+        f"<b>📦 Замовлень через бота:</b> {orders_count}",
+        f"<b>🎁 Бонус:</b> {bonus}%" if bonus else "<b>🎁 Бонус:</b> немає",
+        "",
+        f"<b>🚛 Тип послуги:</b> {safe_text(data.get('service_type'))}",
+        f"<b>📦 Вантаж:</b> {cargo_label}",
+    ]
+
+    if note:
+        lines.insert(8, f"<b>📝 Внутрішня примітка:</b> {safe_text(note)}")
+
+    if data.get("car_brand_model"):
+        lines.append(f"<b>🚗 Марка/модель авто:</b> {safe_text(data.get('car_brand_model'))}")
+
+    if data.get("dimensions"):
+        lines.append(f"<b>📏 Габарити:</b> {safe_text(data.get('dimensions'))}")
+
+    lines.extend([
+        f"<b>⚖️ Вага:</b> {safe_text(data.get('weight'))}",
+        f"<b>⏰ Терміновість:</b> {safe_text(data.get('urgency_type'))}",
+    ])
+
+    if data.get("urgency_type") == "На інший день":
+        lines.append(f"<b>📅 Дата:</b> {safe_text(data.get('scheduled_date'))}")
+        lines.append(f"<b>🕐 Час:</b> {safe_text(data.get('scheduled_time'))}")
+
+    lines.extend([
+        f"<b>📍 Адреса завантаження:</b> {safe_text(data.get('loading_address'))}",
+        f"<b>📍 Адреса розвантаження:</b> {safe_text(data.get('unloading_address'))}",
+        f"<b>📞 Тел. замовника:</b> {safe_text(data.get('client_phone'))}",
+        f"<b>📞 Тел. завантаження:</b> {safe_text(data.get('loading_phone'))}",
+        f"<b>📞 Тел. розвантаження:</b> {safe_text(data.get('unloading_phone'))}",
+    ])
+
+    payer_line = f"<b>💰 Платник:</b> {safe_text(data.get('payer_type'))}"
+    if data.get("payer_type") == "БН" and data.get("payer_details"):
+        payer_line += f" - {safe_text(data.get('payer_details'))}"
+    lines.append(payer_line)
+
+    if data.get("support_required") == "потрібен":
+        lines.append("<b>🚨 Супровід:</b> потрібен")
+
+    if data.get("comment"):
+        lines.append(f"<b>📝 Коментар:</b> {safe_text(data.get('comment'))}")
+
+    loading_lat = data.get("loading_lat")
+    loading_lng = data.get("loading_lng")
+    unloading_lat = data.get("unloading_lat")
+    unloading_lng = data.get("unloading_lng")
+
+    if loading_lat and loading_lng and unloading_lat and unloading_lng:
+        route_url = (
+            f"https://www.openstreetmap.org/directions"
+            f"?from={loading_lat},{loading_lng}&to={unloading_lat},{unloading_lng}"
+        )
+        lines.append("")
+        lines.append(f"🗺️ <a href='{route_url}'>Маршрут на OpenStreetMap</a>")
+
+    return "\n".join(lines)
+
+
+def build_profile_text(profile: dict) -> str:
+    customer_name = profile.get("customer_name") or profile.get("telegram_full_name") or "Клієнт"
+    bonus_percent = profile.get("bonus_percent") or 0
+    bonus_line = f"-{bonus_percent}% на наступне замовлення" if bonus_percent > 0 else "немає"
+
+    lines = [
+        "<b>👤 ПРОФІЛЬ КЛІЄНТА</b>",
+        "",
+        f"<b>Ім’я:</b> {safe_text(customer_name)}",
+        f"<b>📞 Телефон:</b> {safe_text(profile.get('phone'))}",
+        f"<b>⭐ Статус:</b> {safe_text(profile.get('client_tag'), 'Новий клієнт')}",
+        f"<b>📦 Замовлень через бота:</b> {profile.get('orders_count', 0)}",
+        f"<b>🎁 Активний бонус:</b> {bonus_line}",
+    ]
+
+    return "\n".join(lines)
+
+
+def can_leave_review(order: dict) -> bool:
+    return order.get("status") in REVIEW_AVAILABLE_STATUSES
+
+
+def build_order_card_text(order: dict, review: Optional[dict]) -> str:
+    service = safe_text(order.get("service_type"), "не вказано")
+
+    loading = safe_text(order.get("loading_address"))
+    unloading = safe_text(order.get("unloading_address"))
+
+    if loading == "-" and unloading == "-":
+        route = "📍 не вказано"
+    else:
+        route = f"📍 {loading} → {unloading}"
+
+    status = order.get("status")
+
+    if status == ORDER_STATUS_AGREED:
+        status_text = "✅ Ви погодилися з ціною"
+    elif status == ORDER_STATUS_DECLINED:
+        status_text = "❌ Ви відмовилися від ціни"
+    elif status == ORDER_STATUS_PRICE_SENT:
+        status_text = "💰 Ціну надіслано"
+    elif status == ORDER_STATUS_CREATED:
+        status_text = "🆕 Заявку створено"
+    else:
+        status_text = safe_text(status)
+
+    lines = [
+        f"<b>🚚 Замовлення #{order['id']}</b>",
+        f"🛠 Послуга: {service}",
+        route,
+        f"📊 Статус: {status_text}",
+        f"🕒 Дата: {safe_text(order.get('created_at'))}",
+    ]
+
+    if order.get("price"):
+        lines.append(f"💰 Ціна: {safe_text(order.get('price'))}")
+
+    lines.append("😔 Ви не залишили відгук")
+    lines.append("")
+    lines.append("⭐ Натисніть кнопку нижче, щоб залишити відгук")
+    lines.append("──────────")
+
+    return "\n".join(lines)
+
+
+def build_review_chat_message(order: dict, user: types.User, stars: int, reason: str) -> str:
+    marker = "🟢 Позитивний відгук" if stars >= 4 else "🔴 Негативний відгук"
+    customer_name = order.get("customer_name") or user.full_name or "Не вказано"
+    username = f"@{html.escape(user.username)}" if user.username else "немає"
+    created_at = datetime.now().strftime("%d.%m.%Y %H:%M")
+
+    return "\n".join([
+        f"<b>{marker}</b>",
+        "",
+        f"<b>Замовлення:</b> #{order['id']}",
+        f"<b>Клієнт:</b> {safe_text(customer_name)}",
+        f"<b>Telegram ID:</b> {user.id}",
+        f"<b>Username:</b> {username}",
+        f"<b>Тип послуги:</b> {safe_text(order.get('service_type'))}",
+        f"<b>Маршрут:</b> {safe_text(order.get('loading_address'))} → {safe_text(order.get('unloading_address'))}",
+        f"<b>Оцінка:</b> {'⭐' * stars}",
+        f"<b>Причина:</b> {safe_text(reason)}",
+        f"<b>Дата відгуку:</b> {created_at}",
+    ])
+
+
+async def ask_for_client_phone_input(message: Message, edit_mode: bool = False):
+    prompt = (
+        "Оберіть спосіб введення номера телефону замовника/платника/відповідального:"
+        if not edit_mode
+        else "Оберіть спосіб введення нового номера телефону замовника:"
+    )
+    await message.answer(
+        f"{prompt}\n\n"
+        "• Надішліть свій номер через Telegram\n"
+        "• Або введіть інший номер вручну",
+        reply_markup=build_phone_input_keyboard(),
+    )
+
+
+async def finalize_client_phone(message: Message, state: FSMContext, phone: str):
+    await state.update_data(client_phone=phone)
+    data = await state.get_data()
+
+    if data.get("edit_mode"):
+        await state.update_data(edit_mode=False)
+        await show_confirmation(message, state)
+        return
+
+    await message.answer(
+        "Як до вас звертатися?\nНаприклад: Андрій",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    await state.set_state(Form.customer_name)
+
+# =========================
+# PROFILE RENDER
+# =========================
+async def send_profile(message: Message, telegram_id: int):
+    profile = get_user_profile(telegram_id)
+    if profile is None:
+        await message.answer("Профіль поки що порожній. Створіть перше замовлення через /order")
+        return
+
+    text = build_profile_text(profile)
+    profile_banner = BASE_DIR / "profile_banner.jpg"
+
+    if profile_banner.exists():
+        await message.answer_photo(
+            FSInputFile(str(profile_banner)),
+            caption=text,
+            parse_mode="HTML",
+            reply_markup=get_profile_keyboard(),
+        )
+    else:
+        await message.answer(
+            text,
+            parse_mode="HTML",
+            reply_markup=get_profile_keyboard(),
+        )
+
+# =========================
+# COMMANDS
+# =========================
+@router.message(CommandStart())
+async def cmd_start(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
+
+    await state.clear()
+
+    user = message.from_user
+    if user:
+        upsert_user(
+            telegram_id=user.id,
+            telegram_full_name=user.full_name or "",
+            telegram_username=user.username or "",
+        )
+
+    photo_path = BASE_DIR / "welcome.jpg"
+    caption_text = (
+        "<b>Express T</b> — професійні вантажні та автомобільні перевезення по Україні.\n\n"
+        "Наша компанія пропонує:\n"
+        "• Вантажні перевезення\n"
+        "• Евакуатор\n"
+        "• Гідравлічна платформа\n"
+        "• Кран-маніпулятор\n\n"
+        "✅ Надійність\n"
+        "✅ Оперативність\n"
+        "✅ Індивідуальний підхід\n\n"
+        "ℹ️ Для інструкції натисніть /help\n"
+        "👤 Профіль: /profile\n"
+        "🚀 Щоб зробити замовлення, натисніть /order"
+    )
+
+    if photo_path.exists():
+        await message.answer_photo(
+            FSInputFile(str(photo_path)),
+            caption=caption_text,
+            parse_mode="HTML",
+        )
+    else:
+        await message.answer(caption_text, parse_mode="HTML")
+
+
+@router.message(Command("help"))
+async def help_command(message: Message):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
+
+    help_text = (
+        "<b>Як зробити замовлення через Express T?</b>\n\n"
+        "1️⃣ Натисніть <b>/order</b> для початку оформлення заявки.\n"
+        "2️⃣ Оберіть тип послуги та дотримуйтесь інструкцій бота.\n"
+        "3️⃣ Заповніть усі необхідні поля: тип авто/вантажу, габарити, вага, адреси, телефони тощо.\n"
+        "4️⃣ Після заповнення заявки натисніть <b>Підтвердити</b> — ваша заявка буде надіслана менеджеру.\n"
+        "5️⃣ Менеджер розрахує ціну та надішле вам пропозицію.\n"
+        "6️⃣ Ви можете <b>Погодитись</b> або <b>Відмовитись</b> від ціни.\n\n"
+        "👤 Ваш профіль: <b>/profile</b>\n\n"
+        "<b>Важливо!</b>\n"
+        "• Після першого підтвердження заявка лише надсилається менеджеру для розрахунку ціни.\n"
+        "• Ви можете ознайомитись з ціною та <b>відмовитись</b> — це не зобов'язує вас робити замовлення.\n"
+        "• Якщо ви погоджуєтесь з ціною вдруге, ваше замовлення буде виконано.\n\n"
+        "Якщо залишились питання — звертайтесь до менеджера або пишіть у чат підтримки."
+    )
+    await message.answer(help_text, parse_mode="HTML")
+
+
+@router.message(Command("profile"))
+async def profile_command(message: Message):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
+
+    user = message.from_user
+    if user is None:
+        return
+
+    upsert_user(
+        telegram_id=user.id,
+        telegram_full_name=user.full_name or "",
+        telegram_username=user.username or "",
+    )
+    await send_profile(message, user.id)
+
+
+@router.message(Command("order"))
+async def cmd_order(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
+
+    await state.clear()
+    await message.answer(
+        "Оберіть тип послуги:",
+        reply_markup=build_reply_keyboard(SERVICE_TYPES),
+    )
+    await state.set_state(Form.service_type)
+
+# =========================
+# ADMIN COMMANDS
+# =========================
+@router.message(Command("ban"))
+async def ban_user_command(message: Message):
+    if not is_admin_chat_message(message):
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) != 2:
+        await message.answer("Формат: /ban [ID_клієнта]")
+        return
+
+    try:
+        user_id = int(parts[1])
+    except ValueError:
+        await message.answer("Формат: /ban [ID_клієнта]")
+        return
+
+    banned = load_banned_users()
+    if user_id in banned:
+        await message.answer(f"⚠️ Користувач {user_id} вже заблокований.")
+        return
+
+    banned.add(user_id)
+    save_banned_users(banned)
+    await message.answer(f"🚫 Користувача {user_id} заблоковано.")
+
+
+@router.message(Command("unban"))
+async def unban_user_command(message: Message):
+    if not is_admin_chat_message(message):
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) != 2:
+        await message.answer("Формат: /unban [ID_клієнта]")
+        return
+
+    try:
+        user_id = int(parts[1])
+    except ValueError:
+        await message.answer("Формат: /unban [ID_клієнта]")
+        return
+
+    banned = load_banned_users()
+    if user_id not in banned:
+        await message.answer(f"⚠️ Користувач {user_id} не знайдений у бані.")
+        return
+
+    banned.remove(user_id)
+    save_banned_users(banned)
+    await message.answer(f"✅ Користувача {user_id} розблоковано.")
+
+
+@router.message(Command("banlist"))
+async def banlist_command(message: Message):
+    if not is_admin_chat_message(message):
+        return
+
+    banned = sorted(load_banned_users())
+    if not banned:
+        await message.answer("Список бану порожній.")
+        return
+
+    text = "🚫 <b>Заблоковані користувачі:</b>\n\n" + "\n".join(str(uid) for uid in banned)
+    await message.answer(text, parse_mode="HTML")
+
+
+@router.message(Command("bonus"))
+async def bonus_command(message: Message):
+    if not is_admin_chat_message(message):
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) != 3:
+        await message.answer("Формат: /bonus [ID_клієнта] [відсоток]")
+        return
+
+    try:
+        user_id = int(parts[1])
+        percent = int(parts[2])
+    except ValueError:
+        await message.answer("Формат: /bonus [ID_клієнта] [відсоток]")
+        return
+
+    if percent < 0 or percent > 100:
+        await message.answer("Відсоток має бути від 0 до 100.")
+        return
+
+    set_user_bonus(user_id, percent)
+    await message.answer(f"🎁 Клієнту {user_id} встановлено бонус {percent}%")
+
+    try:
+        if percent > 0:
+            await bot.send_message(
+                user_id,
+                f"🎁 Вам нараховано бонус -{percent}% на наступне замовлення!"
+            )
+        else:
+            await bot.send_message(user_id, "🎁 Ваш бонус оновлено.")
+    except Exception:
+        pass
+
+
+@router.message(Command("settag"))
+async def settag_command(message: Message):
+    if not is_admin_chat_message(message):
+        return
+
+    parts = (message.text or "").split(maxsplit=2)
+    if len(parts) < 3:
+        await message.answer("Формат: /settag [ID_клієнта] [статус]")
+        return
+
+    try:
+        user_id = int(parts[1])
+    except ValueError:
+        await message.answer("Формат: /settag [ID_клієнта] [статус]")
+        return
+
+    tag = parts[2].strip()
+    if len(tag) < 2:
+        await message.answer("Статус занадто короткий.")
+        return
+
+    set_user_tag(user_id, tag)
+    await message.answer(f"⭐ Клієнту {user_id} встановлено статус: {tag}")
+
+
+@router.message(Command("setnote"))
+async def setnote_command(message: Message):
+    if not is_admin_chat_message(message):
+        return
+
+    parts = (message.text or "").split(maxsplit=2)
+    if len(parts) < 3:
+        await message.answer("Формат: /setnote [ID_клієнта] [примітка]")
+        return
+
+    try:
+        user_id = int(parts[1])
+    except ValueError:
+        await message.answer("Формат: /setnote [ID_клієнта] [примітка]")
+        return
+
+    note = parts[2].strip()
+    set_user_note(user_id, note)
+    await message.answer(f"📝 Клієнту {user_id} оновлено примітку.")
+
+# =========================
+# ORDER FLOW
+# =========================
+@router.message(Form.service_type)
+async def process_service_type(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
+
+    text = message.text or ""
+    if text not in SERVICE_TYPES:
+        await message.answer("Будь ласка, оберіть тип послуги, використовуючи кнопки.")
+        return
+
+    await state.update_data(service_type=text)
+
+    if text in {"Евакуатор", "Гідравлічна платформа", "Кран-маніпулятор"}:
+        await message.answer("Оберіть тип авто:", reply_markup=build_reply_keyboard(CAR_TYPES))
+    else:
+        await message.answer(
+            "Вкажіть, будь ласка, назву вантажу:",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+
+    await state.set_state(Form.cargo_name)
+
+
+@router.message(Form.cargo_name)
+async def process_cargo_name(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
+
+    text = (message.text or "").strip()
+    data = await state.get_data()
+    service_type = data.get("service_type")
+
+    if service_type in {"Евакуатор", "Гідравлічна платформа", "Кран-маніпулятор"}:
+        if text not in CAR_TYPES:
+            await message.answer("Будь ласка, оберіть тип авто, використовуючи кнопки.")
+            return
+
+        await state.update_data(cargo_name=text)
+
+        if text == "Інше":
+            await state.update_data(car_brand_model=None)
+            await message.answer(
+                "Вкажіть, будь ласка, що саме потрібно перевезти.\n"
+                "Наприклад: кіоск, МАФ, генератор, навантажувач.",
+                reply_markup=ReplyKeyboardRemove(),
+            )
+            await state.set_state(Form.custom_cargo_description)
+            return
+
+        await message.answer(
+            "Вкажіть марку та модель авто.\n"
+            "Наприклад: Toyota Camry, Mercedes Sprinter, Dodge RAM.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        await state.set_state(Form.car_brand_model)
+        return
+
+    if len(text) < 2:
+        await message.answer("Будь ласка, введіть коректну назву вантажу.")
+        return
+
+    await state.update_data(cargo_name=text)
+    await message.answer(
+        "Вкажіть габаритні розміри (Д*Ш*В, м):",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    await state.set_state(Form.dimensions)
+
+
+@router.message(Form.custom_cargo_description)
+async def process_custom_cargo_description(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
+
+    text = (message.text or "").strip()
+    if len(text) < 3:
+        await message.answer(
+            "Будь ласка, коротко вкажіть, що саме потрібно перевезти.\n"
+            "Наприклад: кіоск, МАФ, генератор, навантажувач."
+        )
+        return
+
+    await state.update_data(custom_cargo_description=text)
+    data = await state.get_data()
+
+    if data.get("edit_mode"):
+        await state.update_data(edit_mode=False)
+        await show_confirmation(message, state)
+        return
+
+    await message.answer(
+        "Вкажіть габаритні розміри (Д*Ш*В, м):",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    await state.set_state(Form.dimensions)
+
+
+@router.message(Form.car_brand_model)
+async def process_car_brand_model(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
+
+    text = (message.text or "").strip()
+    if not is_valid_car_brand_model(text):
+        await message.answer(
+            "Будь ласка, введіть марку та модель у зрозумілому форматі.\n"
+            "Наприклад: Toyota Camry, Mercedes Sprinter, Dodge RAM, Mitsubishi Lancer 10."
+        )
+        return
+
+    await state.update_data(car_brand_model=text)
+    data = await state.get_data()
+
+    if data.get("edit_mode"):
+        await state.update_data(edit_mode=False)
+        await show_confirmation(message, state)
+        return
+
+    if needs_dimensions(data.get("service_type"), data.get("cargo_name")):
+        await message.answer(
+            "Вкажіть габаритні розміри (Д*Ш*В, м):",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        await state.set_state(Form.dimensions)
+        return
+
+    await message.answer("Вкажіть вагу (кг):", reply_markup=ReplyKeyboardRemove())
+    await state.set_state(Form.weight)
+
+
+@router.message(Form.dimensions)
+async def process_dimensions(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
+
+    text = (message.text or "").strip()
+    normalized = normalize_dimensions(text)
+
+    if not normalized:
+        await message.answer(
+            "Введіть габарити у форматі: Д*Ш*В (наприклад, 4.2*2.1*1.8)."
+        )
+        return
+
+    await state.update_data(dimensions=normalized)
+    data = await state.get_data()
+
+    if data.get("edit_mode"):
+        await state.update_data(edit_mode=False)
+        await show_confirmation(message, state)
+        return
+
+    height = extract_height(normalized)
+    if height is not None and height > 3:
+        await message.answer(
+            "🚨 <b>Негабарит!</b> Висота вантажу більше 3 м. Для такого вантажу потрібен супровід. Чи забезпечуєте супровід?",
+            reply_markup=build_reply_keyboard(["Супроводжуємо", "Не супроводжуємо"]),
+            parse_mode="HTML",
+        )
+        await state.set_state(Form.oversize_support)
+        return
+
+    await message.answer("Вкажіть вагу (кг):", reply_markup=ReplyKeyboardRemove())
+    await state.set_state(Form.weight)
+
+
+@router.message(Form.oversize_support)
+async def process_oversize_support(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
+
+    text = message.text or ""
+
+    if text == "Супроводжуємо":
+        await state.update_data(support_required="потрібен")
+        await message.answer("Вкажіть вагу (кг):", reply_markup=ReplyKeyboardRemove())
+        await state.set_state(Form.weight)
+        return
+
+    if text == "Не супроводжуємо":
+        await message.answer(
+            "❌ На жаль, ми не можемо виконати перевезення без супроводу для негабаритного вантажу.\n\n"
+            "Якщо бажаєте оформити нову заявку — натисніть /order",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        await state.clear()
+        return
+
+    await message.answer("Будь ласка, використовуйте кнопки.")
+
+
+@router.message(Form.weight)
+async def process_weight(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
+
+    text = (message.text or "").strip()
+    weight = parse_weight(text)
+    if weight is None:
+        await message.answer("Будь ласка, введіть коректну вагу. Наприклад: 1000 або 1.5 т")
+        return
+
+    await state.update_data(weight=str(weight))
+    data = await state.get_data()
+
+    if data.get("edit_mode"):
+        await state.update_data(edit_mode=False)
+        await show_confirmation(message, state)
+        return
+
+    await message.answer(
+        "На коли потрібно перевезення?",
+        reply_markup=build_reply_keyboard(URGENCY_TYPES),
+    )
+    await state.set_state(Form.urgency_type)
+
+
+@router.message(Form.urgency_type)
+async def process_urgency_type(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
+
+    text = message.text or ""
+    if text not in URGENCY_TYPES:
+        await message.answer("Будь ласка, оберіть терміновість, використовуючи кнопки.")
+        return
+
+    await state.update_data(urgency_type=text)
+    data = await state.get_data()
+
+    if data.get("edit_mode"):
+        if text == "На інший день":
+            await message.answer(
+                "Вкажіть нову дату (формат: ДД.ММ.РРРР):",
+                reply_markup=ReplyKeyboardRemove(),
+            )
+            await state.set_state(Form.scheduled_date)
+            return
+
+        await state.update_data(
+            scheduled_date="На зараз",
+            scheduled_time="На зараз",
+            edit_mode=False,
+        )
+        await show_confirmation(message, state)
+        return
+
+    if text == "На інший день":
+        await message.answer(
+            "Вкажіть дату (формат: ДД.ММ.РРРР):",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        await state.set_state(Form.scheduled_date)
+        return
+
+    await state.update_data(scheduled_date="На зараз", scheduled_time="На зараз")
+    await message.answer(
+        "🗺️ Вкажіть адресу завантаження.\nВідкрийте карту або введіть адресу текстом.\nНаприклад: Київ, вул. Бориспільська, 12",
+        reply_markup=build_address_keyboard("loading"),
+    )
+    await state.set_state(Form.loading_address)
+
+
+@router.message(Form.scheduled_date)
+async def process_scheduled_date(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
+
+    text = (message.text or "").strip()
+
+    try:
+        date_obj = datetime.strptime(text, "%d.%m.%Y")
+        if date_obj.date() < datetime.now().date():
+            await message.answer("Дата не може бути в минулому. Введіть коректну дату (ДД.ММ.РРРР).")
+            return
+    except ValueError:
+        await message.answer("Невірний формат дати. Введіть у форматі ДД.ММ.РРРР.")
+        return
+
+    await state.update_data(scheduled_date=text)
+    await message.answer("Вкажіть час (формат: ГГ:ХХ):")
+    await state.set_state(Form.scheduled_time)
+
+
+@router.message(Form.scheduled_time)
+async def process_scheduled_time(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
+
+    text = (message.text or "").strip()
+
+    if not re.fullmatch(r"\d{2}:\d{2}", text):
+        await message.answer("Невірний формат часу. Введіть у форматі ГГ:ХХ (наприклад, 14:30).")
+        return
+
+    try:
+        datetime.strptime(text, "%H:%M")
+    except ValueError:
+        await message.answer("Невірний час. Введіть у форматі ГГ:ХХ (наприклад, 14:30).")
+        return
+
+    await state.update_data(scheduled_time=text)
+    data = await state.get_data()
+
+    if data.get("edit_mode"):
+        await state.update_data(edit_mode=False)
+        await show_confirmation(message, state)
+        return
+
+    await message.answer(
+        "🗺️ Вкажіть адресу завантаження.\nВідкрийте карту або введіть адресу текстом.\nНаприклад: Київ, вул. Бориспільська, 12",
+        reply_markup=build_address_keyboard("loading"),
+    )
+    await state.set_state(Form.loading_address)
+
+
+@router.message(Form.loading_address)
+async def process_loading_address(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
+
+    # Данные с карты
+    if message.web_app_data is not None:
+        try:
+            payload = json.loads(message.web_app_data.data)
+            address = (payload.get("address") or "").strip()
+            lat = payload.get("lat")
+            lng = payload.get("lng")
+        except Exception:
+            await message.answer("Помилка даних з карти. Спробуйте ще раз.")
+            return
+
+        await state.update_data(loading_address=address, loading_lat=lat, loading_lng=lng)
+        data = await state.get_data()
+
+        if data.get("edit_mode"):
+            await state.update_data(edit_mode=False)
+            await show_confirmation(message, state)
+            return
+
+        await message.answer(
+            f"✅ Адресу завантаження збережено:\n<b>{html.escape(address)}</b>\n\n"
+            "🗺️ Тепер вкажіть адресу розвантаження.\nВідкрийте карту або введіть адресу текстом.",
+            reply_markup=build_address_keyboard("unloading"),
+            parse_mode="HTML",
+        )
+        await state.set_state(Form.unloading_address)
+        return
+
+    # Ручний ввід тексту
+    text = (message.text or "").strip()
+    if not is_valid_address(text):
+        await message.answer(
+            "Будь ласка, введіть повну адресу завантаження.\n"
+            "Наприклад: Київ, вул. Бориспільська, 12"
+        )
+        return
+
+    await state.update_data(loading_address=text, loading_lat=None, loading_lng=None)
+    data = await state.get_data()
+
+    if data.get("edit_mode"):
+        await state.update_data(edit_mode=False)
+        await show_confirmation(message, state)
+        return
+
+    await message.answer(
+        "🗺️ Вкажіть адресу розвантаження.\nВідкрийте карту або введіть адресу текстом.\nНаприклад: Київ, вул. Січових Стрільців, 18",
+        reply_markup=build_address_keyboard("unloading"),
+    )
+    await state.set_state(Form.unloading_address)
+
+
+@router.message(Form.unloading_address)
+async def process_unloading_address(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
+
+    # Данные с карты
+    if message.web_app_data is not None:
+        try:
+            payload = json.loads(message.web_app_data.data)
+            address = (payload.get("address") or "").strip()
+            lat = payload.get("lat")
+            lng = payload.get("lng")
+        except Exception:
+            await message.answer("Помилка даних з карти. Спробуйте ще раз.")
+            return
+
+        await state.update_data(unloading_address=address, unloading_lat=lat, unloading_lng=lng)
+        data = await state.get_data()
+
+        if data.get("edit_mode"):
+            await state.update_data(edit_mode=False)
+            await show_confirmation(message, state)
+            return
+
+        await ask_for_client_phone_input(message)
+        await state.set_state(Form.client_phone_input_choice)
+        return
+
+    # Ручний ввід тексту
+    text = (message.text or "").strip()
+    if not is_valid_address(text):
+        await message.answer(
+            "Будь ласка, введіть повну адресу розвантаження.\n"
+            "Наприклад: Київ, вул. Січових Стрільців, 18"
+        )
+        return
+
+    await state.update_data(unloading_address=text, unloading_lat=None, unloading_lng=None)
+    data = await state.get_data()
+
+    if data.get("edit_mode"):
+        await state.update_data(edit_mode=False)
+        await show_confirmation(message, state)
+        return
+
+    await ask_for_client_phone_input(message)
+    await state.set_state(Form.client_phone_input_choice)
+
+
+@router.message(Form.client_phone_input_choice)
+async def process_client_phone_input_choice(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
+
+    if message.contact:
+        contact = message.contact
+        user = message.from_user
+
+        if user is None:
+            await message.answer("Не вдалося визначити користувача. Спробуйте ще раз.")
+            return
+
+        if contact.user_id and contact.user_id != user.id:
+            await message.answer(
+                "Будь ласка, надішліть саме свій номер через Telegram або введіть інший номер вручну.",
+                reply_markup=build_phone_input_keyboard(),
+            )
+            return
+
+        phone = extract_phone_from_contact(contact)
+        if not phone:
+            await message.answer(
+                "Не вдалося прийняти цей номер. Перевірте номер або введіть його вручну у форматі 0XXXXXXXXX, 380XXXXXXXXX або +380XXXXXXXXX.",
+                reply_markup=build_phone_input_keyboard(),
+            )
+            return
+
+        await finalize_client_phone(message, state, phone)
+        return
+
+    text = (message.text or "").strip()
+
+    if text == MANUAL_PHONE_INPUT_TEXT:
+        await message.answer(
+            "Введіть номер телефону у форматі 0XXXXXXXXX, 380XXXXXXXXX або +380XXXXXXXXX.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        await state.set_state(Form.client_phone)
+        return
+
+    await message.answer(
+        "Будь ласка, оберіть один зі способів: надішліть свій номер через Telegram або введіть номер вручну.",
+        reply_markup=build_phone_input_keyboard(),
+    )
+
+
+@router.message(Form.client_phone)
+async def process_client_phone(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
+
+    phone = normalize_phone(message.text or "")
+    if not phone:
+        await message.answer(
+            "Будь ласка, введіть коректний український номер телефону.\n"
+            "Підійдуть формати: 0XXXXXXXXX, 380XXXXXXXXX або +380XXXXXXXXX.\n"
+            "Номер не повинен бути очевидно фейковим."
+        )
+        return
+
+    await finalize_client_phone(message, state, phone)
+
+
+@router.message(Form.customer_name)
+async def process_customer_name(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
+
+    text = (message.text or "").strip()
+    if not is_valid_customer_name(text):
+        await message.answer(
+            "Будь ласка, вкажіть ім’я або ім’я звернення.\n"
+            "Наприклад: Андрій"
+        )
+        return
+
+    await state.update_data(customer_name=text)
+    data = await state.get_data()
+
+    if data.get("edit_mode"):
+        await state.update_data(edit_mode=False)
+        await show_confirmation(message, state)
+        return
+
+    await message.answer(
+        "Хто буде на завантаженні?",
+        reply_markup=build_reply_keyboard(LOADING_PHONE_OPTIONS),
+    )
+    await state.set_state(Form.loading_phone_choice)
+
+
+@router.message(Form.loading_phone_choice)
+async def process_loading_phone_choice(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
+
+    text = message.text or ""
+    data = await state.get_data()
+    client_phone = data.get("client_phone")
+
+    if text == "Цей самий номер":
+        await state.update_data(loading_phone=client_phone)
+        if data.get("edit_mode"):
+            await state.update_data(edit_mode=False)
+            await show_confirmation(message, state)
+            return
+
+        await message.answer(
+            "Хто буде на розвантаженні?",
+            reply_markup=build_reply_keyboard(UNLOADING_PHONE_OPTIONS),
+        )
+        await state.set_state(Form.unloading_phone_choice)
+        return
+
+    if text == "Інший номер":
+        await message.answer(
+            "Вкажіть номер телефону відповідального за завантаження:",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        await state.set_state(Form.loading_phone)
+        return
+
+    await message.answer("Будь ласка, використовуйте кнопки.")
+
+
+@router.message(Form.loading_phone)
+async def process_loading_phone(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
+
+    phone = normalize_phone(message.text or "")
+    if not phone:
+        await message.answer(
+            "Будь ласка, введіть коректний український номер телефону у форматі 0XXXXXXXXX, 380XXXXXXXXX або +380XXXXXXXXX."
+        )
+        return
+
+    await state.update_data(loading_phone=phone)
+    data = await state.get_data()
+
+    if data.get("edit_mode"):
+        await state.update_data(edit_mode=False)
+        await show_confirmation(message, state)
+        return
+
+    await message.answer(
+        "Хто буде на розвантаженні?",
+        reply_markup=build_reply_keyboard(UNLOADING_PHONE_OPTIONS),
+    )
+    await state.set_state(Form.unloading_phone_choice)
+
+
+@router.message(Form.unloading_phone_choice)
+async def process_unloading_phone_choice(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
+
+    text = message.text or ""
+    data = await state.get_data()
+    client_phone = data.get("client_phone")
+    loading_phone = data.get("loading_phone")
+
+    if text == "Цей самий номер":
+        await state.update_data(unloading_phone=client_phone)
+        if data.get("edit_mode"):
+            await state.update_data(edit_mode=False)
+            await show_confirmation(message, state)
+            return
+
+        await message.answer(
+            "Оберіть тип платника:",
+            reply_markup=build_reply_keyboard(PAYER_TYPES),
+        )
+        await state.set_state(Form.payer_type)
+        return
+
+    if text == "Номер із завантаження":
+        await state.update_data(unloading_phone=loading_phone)
+        if data.get("edit_mode"):
+            await state.update_data(edit_mode=False)
+            await show_confirmation(message, state)
+            return
+
+        await message.answer(
+            "Оберіть тип платника:",
+            reply_markup=build_reply_keyboard(PAYER_TYPES),
+        )
+        await state.set_state(Form.payer_type)
+        return
+
+    if text == "Інший номер":
+        await message.answer(
+            "Вкажіть номер телефону відповідального за розвантаження:",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        await state.set_state(Form.unloading_phone)
+        return
+
+    await message.answer("Будь ласка, використовуйте кнопки.")
+
+
+@router.message(Form.unloading_phone)
+async def process_unloading_phone(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
+
+    phone = normalize_phone(message.text or "")
+    if not phone:
+        await message.answer(
+            "Будь ласка, введіть коректний український номер телефону у форматі 0XXXXXXXXX, 380XXXXXXXXX або +380XXXXXXXXX."
+        )
+        return
+
+    await state.update_data(unloading_phone=phone)
+    data = await state.get_data()
+
+    if data.get("edit_mode"):
+        await state.update_data(edit_mode=False)
+        await show_confirmation(message, state)
+        return
+
+    await message.answer(
+        "Оберіть тип платника:",
+        reply_markup=build_reply_keyboard(PAYER_TYPES),
+    )
+    await state.set_state(Form.payer_type)
+
+
+@router.message(Form.payer_type)
+async def process_payer_type(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
+
+    text = message.text or ""
+
+    if text == "Готівка":
+        await state.update_data(payer_type="Готівка", payer_details="-")
+        await message.answer(
+            "Бажаєте залишити коментар до заявки?\n\n"
+            "<i>Це поле необов'язкове. Якщо не потрібно — надішліть мінус: -</i>",
+            parse_mode="HTML",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        await state.set_state(Form.comment)
+        return
+
+    if text == "БН":
+        await state.update_data(payer_type="БН")
+        await message.answer(
+            "Вкажіть, будь ласка, назву платника та код ЄДРПОУ (через кому):",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        await state.set_state(Form.payer_details)
+        return
+
+    await message.answer("Будь ласка, оберіть тип платника, використовуючи кнопки.")
+
+
+@router.message(Form.payer_details)
+async def process_payer_details(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
+
+    text = (message.text or "").strip()
+    if len(text) < 3:
+        await message.answer("Будь ласка, введіть коректні дані платника.")
+        return
+
+    await state.update_data(payer_details=text)
+    await message.answer(
+        "Бажаєте залишити коментар до заявки?\n\n"
+        "<i>Це поле необов'язкове. Якщо не потрібно — надішліть мінус: -</i>",
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    await state.set_state(Form.comment)
+
+
+@router.message(Form.comment)
+async def process_comment(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
+
+    text = (message.text or "").strip()
+
+    if text != "-" and len(text) > 300:
+        await message.answer(
+            f"❌ Коментар занадто довгий ({len(text)} символів).\n"
+            "Будь ласка, вкажіть коротко — до 300 символів."
+        )
+        return
+
+    comment = "" if text == "-" else text
+    await state.update_data(comment=comment)
+    await show_confirmation(message, state)
+
+# =========================
+# EDIT FLOW
+# =========================
+@router.callback_query(lambda c: c.data == "edit_main")
+async def edit_main_callback(call: CallbackQuery, state: FSMContext):
+    if await deny_if_not_private_callback(call):
+        return
+    if await deny_if_banned_callback(call):
+        return
+
+    await call.answer()
+    await call.message.answer("Що бажаєте змінити?", reply_markup=get_edit_fields_keyboard())
+
+
+@router.callback_query(lambda c: c.data == "edit_cancel")
+async def edit_cancel_callback(call: CallbackQuery, state: FSMContext):
+    if await deny_if_not_private_callback(call):
+        return
+    if await deny_if_banned_callback(call):
+        return
+
+    await call.answer()
+    await show_confirmation(call.message, state)
+
+
+@router.callback_query(lambda c: c.data.startswith("edit_") and c.data not in {"edit_main", "edit_cancel"})
+async def edit_field_callback(call: CallbackQuery, state: FSMContext):
+    if await deny_if_not_private_callback(call):
+        return
+    if await deny_if_banned_callback(call):
+        return
+
+    await call.answer()
+    field = call.data
+    await state.update_data(edit_mode=True)
+
+    if field == "edit_customer_name":
+        await state.set_state(Form.customer_name)
+        await call.message.answer("Введіть, як до вас звертатися:", reply_markup=ReplyKeyboardRemove())
+        return
+
+    if field == "edit_car_brand_model":
+        await state.set_state(Form.car_brand_model)
+        await call.message.answer("Введіть нову марку та модель авто:", reply_markup=ReplyKeyboardRemove())
+        return
+
+    if field == "edit_custom_cargo_description":
+        await state.set_state(Form.custom_cargo_description)
+        await call.message.answer("Введіть новий опис вантажу:", reply_markup=ReplyKeyboardRemove())
+        return
+
+    if field == "edit_dimensions":
+        await state.set_state(Form.dimensions)
+        await call.message.answer("Введіть нові габарити (Д*Ш*В, м):", reply_markup=ReplyKeyboardRemove())
+        return
+
+    if field == "edit_weight":
+        await state.set_state(Form.weight)
+        await call.message.answer("Введіть нову вагу (кг):", reply_markup=ReplyKeyboardRemove())
+        return
+
+    if field == "edit_urgency_type":
+        await state.set_state(Form.urgency_type)
+        await call.message.answer(
+            "Оберіть нову терміновість:",
+            reply_markup=build_reply_keyboard(URGENCY_TYPES),
+        )
+        return
+
+    if field == "edit_loading_address":
+        await state.set_state(Form.loading_address)
+        await call.message.answer(
+            "🗺️ Вкажіть нову адресу завантаження.\nВідкрийте карту або введіть адресу текстом.",
+            reply_markup=build_address_keyboard("loading"),
+        )
+        return
+
+    if field == "edit_unloading_address":
+        await state.set_state(Form.unloading_address)
+        await call.message.answer(
+            "🗺️ Вкажіть нову адресу розвантаження.\nВідкрийте карту або введіть адресу текстом.",
+            reply_markup=build_address_keyboard("unloading"),
+        )
+        return
+
+    if field == "edit_client_phone":
+        await ask_for_client_phone_input(call.message, edit_mode=True)
+        await state.set_state(Form.client_phone_input_choice)
+        return
+
+    if field == "edit_loading_phone_choice":
+        await state.set_state(Form.loading_phone_choice)
+        await call.message.answer(
+            "Хто буде на завантаженні?",
+            reply_markup=build_reply_keyboard(LOADING_PHONE_OPTIONS),
+        )
+        return
+
+    if field == "edit_unloading_phone_choice":
+        await state.set_state(Form.unloading_phone_choice)
+        await call.message.answer(
+            "Хто буде на розвантаженні?",
+            reply_markup=build_reply_keyboard(UNLOADING_PHONE_OPTIONS),
+        )
+        return
+
+# =========================
+# PROFILE CALLBACKS
+# =========================
+@router.callback_query(lambda c: c.data == "profile_orders")
+async def profile_orders_callback(call: CallbackQuery, state: FSMContext):
+    if await deny_if_not_private_callback(call):
+        return
+    if await deny_if_banned_callback(call):
+        return
+
+    await call.answer()
+    user = call.from_user
+    if user is None:
+        return
+
+    # Удаляем старые сообщения истории/карточек, если они уже были открыты раньше
+    data = await state.get_data()
+    old_extra_ids = data.get("profile_orders_extra_message_ids", [])
+
+    for msg_id in old_extra_ids:
+        try:
+            await bot.delete_message(call.message.chat.id, msg_id)
+        except Exception:
+            pass
+
+    await state.update_data(profile_orders_extra_message_ids=[])
+
+    orders = get_last_orders(user.id, limit=30)
+
+    if not orders:
+        await replace_callback_message(
+            call,
+            "📦 У вас поки що немає заявок через бота.",
+            reply_markup=get_profile_keyboard(),
+            parse_mode=None,
+        )
+        return
+
+    reviews_map = get_reviews_map_for_orders([order["id"] for order in orders])
+
+    review_candidates = []
+    for order in orders:
+        review = reviews_map.get(order["id"])
+        if review is None and can_leave_review(order):
+            review_candidates.append(order)
+
+    review_candidates = review_candidates[:3]
+    review_ids = {o["id"] for o in review_candidates}
+    remaining_orders = [o for o in orders if o["id"] not in review_ids]
+
+    lines = ["<b>📚 Історія замовлень:</b>", ""]
+
+    if remaining_orders:
+        for idx, order in enumerate(remaining_orders, start=1):
+            service = safe_text(order.get("service_type"), "не вказано")
+
+            loading = safe_text(order.get("loading_address"))
+            unloading = safe_text(order.get("unloading_address"))
+
+            if loading == "-" and unloading == "-":
+                route = "📍 не вказано"
+            else:
+                route = f"📍 {loading} → {unloading}"
+
+            status = order.get("status")
+
+            if status == ORDER_STATUS_AGREED:
+                status_text = "✅ Ви погодилися з ціною"
+            elif status == ORDER_STATUS_DECLINED:
+                status_text = "❌ Ви відмовилися від ціни"
+            elif status == ORDER_STATUS_PRICE_SENT:
+                status_text = "💰 Ціну надіслано"
+            elif status == ORDER_STATUS_CREATED:
+                status_text = "🆕 Заявку створено"
+            else:
+                status_text = safe_text(status)
+
+            review = reviews_map.get(order["id"])
+
+            if review is not None:
+                review_text = "😄 Ви залишили відгук"
+            else:
+                review_text = "😔 Ви не залишили відгук"
+
+            lines.append(
+                f"<b>{idx}.</b> 🚚 Замовлення #{order['id']}\n"
+                f"🛠 Послуга: {service}\n"
+                f"{route}\n"
+                f"📊 Статус: {status_text}\n"
+                f"🕒 Дата: {safe_text(order.get('created_at'))}"
+            )
+
+            if order.get("price"):
+                lines.append(f"💰 Ціна: {safe_text(order.get('price'))}")
+
+            lines.append(review_text)
+            lines.append("──────────")
+            lines.append("")
+    else:
+        lines.append("Історія замовлень поки що порожня.")
+        lines.append("")
+
+    if review_candidates:
+        lines.append("<b>⬇️ Нижче ви можете залишити відгук по останніх замовленнях.</b>")
+    else:
+        lines.append("Наразі немає замовлень, для яких потрібно залишити відгук.")
+
+    big_text = "\n".join(lines)
+
+    await replace_callback_message(
+        call,
+        big_text,
+        reply_markup=get_history_actions_keyboard(),
+        parse_mode="HTML",
+    )
+
+    extra_ids = []
+
+    for order in review_candidates:
+        review = reviews_map.get(order["id"])
+        sent = await call.message.answer(
+            build_order_card_text(order, review),
+            parse_mode="HTML",
+            reply_markup=get_order_review_keyboard(order, review),
+        )
+        extra_ids.append(sent.message_id)
+
+    await state.update_data(profile_orders_extra_message_ids=extra_ids)
+
+@router.callback_query(lambda c: c.data == "profile_bonus")
+async def profile_bonus_callback(call: CallbackQuery):
+    if await deny_if_not_private_callback(call):
+        return
+    if await deny_if_banned_callback(call):
+        return
+
+    await call.answer()
+
+    user = call.from_user
+    if user is None:
+        return
+
+    profile = get_user_profile(user.id)
+
+    if profile is None:
+        await replace_callback_message(
+            call,
+            "Профіль поки що порожній.",
+            reply_markup=get_profile_keyboard(),
+            parse_mode=None,
+        )
+        return
+
+    bonus_percent = profile.get("bonus_percent") or 0
+
+    if bonus_percent > 0:
+        text = (
+            f"🎁 <b>Ваш активний бонус:</b> -{bonus_percent}% на наступне замовлення.\n\n"
+        )
+    else:
+        text = "🎁 У вас поки що немає активного бонусу.\n\n"
+
+    text += f"⭐ <b>Ваш статус:</b> {safe_text(profile.get('client_tag'), 'Новий клієнт')}"
+
+    await replace_callback_message(
+        call,
+        text,
+        reply_markup=get_profile_keyboard(),
+        parse_mode="HTML",
+    )
+
+@router.callback_query(lambda c: c.data == "profile_new_order")
+async def profile_new_order_callback(call: CallbackQuery, state: FSMContext):
+    if await deny_if_not_private_callback(call):
+        return
+    if await deny_if_banned_callback(call):
+        return
+
+    await call.answer()
+    await state.clear()
+    await call.message.answer(
+        "Оберіть тип послуги:",
+        reply_markup=build_reply_keyboard(SERVICE_TYPES),
+    )
+    await state.set_state(Form.service_type)
+
+
+@router.callback_query(lambda c: c.data == "profile_support")
+async def profile_support_callback(call: CallbackQuery):
+    if await deny_if_not_private_callback(call):
+        return
+    if await deny_if_banned_callback(call):
+        return
+
+    await call.answer()
+
+    await replace_callback_message(
+        call,
+        f"📞 <b>Телефон диспетчера:</b>\n{html.escape(SUPPORT_PHONE)}",
+        reply_markup=get_profile_keyboard(),
+        parse_mode="HTML",
+    )
+@router.callback_query(lambda c: c.data == "history_close")
+async def history_close_callback(call: CallbackQuery):
+    if await deny_if_not_private_callback(call):
+        return
+    if await deny_if_banned_callback(call):
+        return
+
+    await call.answer()
+
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+
+
+@router.callback_query(lambda c: c.data == "history_back_to_profile")
+async def history_back_to_profile_callback(call: CallbackQuery, state: FSMContext):
+    if await deny_if_not_private_callback(call):
+        return
+    if await deny_if_banned_callback(call):
+        return
+
+    await call.answer()
+
+    data = await state.get_data()
+    extra_ids = data.get("profile_orders_extra_message_ids", [])
+
+    for msg_id in extra_ids:
+        try:
+            await bot.delete_message(call.message.chat.id, msg_id)
+        except Exception:
+            pass
+
+    await state.update_data(profile_orders_extra_message_ids=[])
+
+    user = call.from_user
+    if user is None:
+        return
+
+    profile = get_user_profile(user.id)
+    if profile is None:
+        await replace_callback_message(
+            call,
+            "Профіль поки що порожній.",
+            reply_markup=get_profile_keyboard(),
+            parse_mode=None,
+        )
+        return
+
+    await replace_callback_message(
+        call,
+        build_profile_text(profile),
+        reply_markup=get_profile_keyboard(),
+        parse_mode="HTML",
+    )
+
+# =========================
+# REVIEW FLOW
+# =========================
+@router.callback_query(lambda c: c.data == "review_done")
+async def review_done_callback(call: CallbackQuery):
+    if await deny_if_not_private_callback(call):
+        return
+    if await deny_if_banned_callback(call):
+        return
+
+    await call.answer("Відгук уже залишено.", show_alert=False)
+
+
+@router.callback_query(lambda c: c.data == "review_unavailable")
+async def review_unavailable_callback(call: CallbackQuery):
+    if await deny_if_not_private_callback(call):
+        return
+    if await deny_if_banned_callback(call):
+        return
+
+    await call.answer("Відгук поки недоступний для цього замовлення.", show_alert=True)
+
+
+@router.callback_query(lambda c: c.data == "review_cancel")
+async def review_cancel_callback(call: CallbackQuery, state: FSMContext):
+    if await deny_if_not_private_callback(call):
+        return
+    if await deny_if_banned_callback(call):
+        return
+
+    await state.clear()
+    await call.answer("Залишення відгуку скасовано.")
+    await call.message.answer("Відгук скасовано.")
+
+
+@router.callback_query(lambda c: c.data.startswith("review_leave:"))
+async def review_leave_callback(call: CallbackQuery, state: FSMContext):
+    if await deny_if_not_private_callback(call):
+        return
+    if await deny_if_banned_callback(call):
+        return
+
+    user = call.from_user
+    if user is None:
+        await call.answer("Не вдалося визначити користувача.", show_alert=True)
+        return
+
+    try:
+        order_id = int(call.data.split(":")[1])
+    except (IndexError, ValueError):
+        await call.answer("Помилка даних.", show_alert=True)
+        return
+
+    order = get_order_by_id_for_user(order_id, user.id)
+    if order is None:
+        await call.answer("Замовлення не знайдено.", show_alert=True)
+        return
+
+    if not can_leave_review(order):
+        await call.answer("Відгук поки недоступний для цього замовлення.", show_alert=True)
+        return
+
+    existing_review = get_review_by_order_id(order_id)
+    if existing_review is not None:
+        await call.answer("Відгук уже залишено.", show_alert=True)
+        return
+
+    await state.clear()
+    await state.set_state(ReviewForm.rating)
+    await state.update_data(review_order_id=order_id)
+
+    await call.answer()
+    await replace_callback_message(
+        call,
+        f"Оцініть замовлення #{order_id}:\nОберіть кількість зірок.",
+        reply_markup=get_review_stars_keyboard(order_id),
+        parse_mode=None,
+    )     
+
+
+@router.callback_query(lambda c: c.data.startswith("review_stars:"))
+async def review_stars_callback(call: CallbackQuery, state: FSMContext):
+    if await deny_if_not_private_callback(call):
+        return
+    if await deny_if_banned_callback(call):
+        return
+
+    user = call.from_user
+    if user is None:
+        await call.answer("Не вдалося визначити користувача.", show_alert=True)
+        return
+
+    parts = call.data.split(":")
+    if len(parts) != 3:
+        await call.answer("Помилка даних.", show_alert=True)
+        return
+
+    try:
+        order_id = int(parts[1])
+        stars = int(parts[2])
+    except ValueError:
+        await call.answer("Помилка даних.", show_alert=True)
+        return
+
+    if stars < 1 or stars > 5:
+        await call.answer("Некоректна оцінка.", show_alert=True)
+        return
+
+    order = get_order_by_id_for_user(order_id, user.id)
+    if order is None:
+        await call.answer("Замовлення не знайдено.", show_alert=True)
+        return
+
+    if get_review_by_order_id(order_id) is not None:
+        await call.answer("Відгук уже залишено.", show_alert=True)
+        return
+
+    await state.update_data(
+        review_order_id=order_id,
+        review_stars=stars,
+        review_message_chat_id=call.message.chat.id,
+        review_message_id=call.message.message_id,
+    )
+
+    if stars >= 4:
+        created = create_review(
+            order_id=order_id,
+            telegram_id=user.id,
+            stars=stars,
+            reason="Позитивний відгук",
+        )
+
+        if not created:
+            await call.answer("Відгук уже існує.", show_alert=True)
+            return
+
+        await state.clear()
+
+        try:
+            await bot.send_message(
+                REVIEWS_CHAT_ID,
+                build_review_chat_message(order, user, stars, "Позитивний відгук"),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        except Exception:
+            logging.exception("Failed to send review")
+
+        await call.answer()
+
+        try:
+            await call.message.edit_text(
+                "🧡 Дякуємо за високу оцінку!\n\n"
+                "Ваш відгук допомагає нам ставати кращими.",
+                parse_mode="HTML",
+            )
+
+            await asyncio.sleep(5)
+
+            try:
+                await call.message.delete()
+            except Exception:
+                pass
+
+        except Exception:
+            pass
+
+        return
+
+    await state.set_state(ReviewForm.rating)
+    await call.answer()
+
+    try:
+        await call.message.edit_text(
+            f"⭐ Ваша оцінка: {'⭐' * stars}\n\n"
+            "Будь ласка, підкажіть причину:",
+            reply_markup=get_review_reasons_keyboard(order_id, stars),
+            parse_mode="HTML",
+        )
+    except Exception:
+        await call.message.answer(
+            f"⭐ Ваша оцінка: {'⭐' * stars}\n\n"
+            "Будь ласка, підкажіть причину:",
+            reply_markup=get_review_reasons_keyboard(order_id, stars),
+            parse_mode="HTML",
+        )
+
+
+@router.callback_query(lambda c: c.data.startswith("review_reason:"))
+async def review_reason_callback(call: CallbackQuery, state: FSMContext):
+    if await deny_if_not_private_callback(call):
+        return
+    if await deny_if_banned_callback(call):
+        return
+
+    user = call.from_user
+    if user is None:
+        await call.answer("Не вдалося визначити користувача.", show_alert=True)
+        return
+
+    parts = call.data.split(":")
+    if len(parts) != 4:
+        await call.answer("Помилка даних.", show_alert=True)
+        return
+
+    try:
+        order_id = int(parts[1])
+        stars = int(parts[2])
+    except ValueError:
+        await call.answer("Помилка даних.", show_alert=True)
+        return
+
+    reason_code = parts[3]
+    reason_map = {
+        "expensive": "Дорого",
+        "slow": "Довго",
+        "car_state": "Стан авто",
+        "driver": "Водій",
+        "other": "Інше",
+    }
+
+    reason = reason_map.get(reason_code)
+    if reason is None:
+        await call.answer("Помилка даних.", show_alert=True)
+        return
+
+    order = get_order_by_id_for_user(order_id, user.id)
+    if order is None:
+        await call.answer("Замовлення не знайдено.", show_alert=True)
+        return
+
+    if get_review_by_order_id(order_id) is not None:
+        await call.answer("Відгук уже залишено.", show_alert=True)
+        return
+
+    if reason == "Інше":
+        await state.set_state(ReviewForm.custom_reason)
+
+        try:
+            await call.message.edit_text(
+                "✍️ Введіть причину відгуку текстом:",
+                parse_mode="HTML",
+            )
+        except Exception:
+            await call.message.answer(
+                "✍️ Введіть причину відгуку текстом:",
+                parse_mode="HTML",
+            )
+
+        return
+
+    created = create_review(order_id=order_id, telegram_id=user.id, stars=stars, reason=reason)
+
+    if not created:
+        await call.answer("Відгук уже існує.", show_alert=True)
+        await state.clear()
+        return
+
+    await state.clear()
+
+    try:
+        await bot.send_message(
+            REVIEWS_CHAT_ID,
+            build_review_chat_message(order, user, stars, reason),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+    except Exception:
+        logging.exception("Failed to send review")
+
+    await call.answer()
+
+    try:
+        await call.message.edit_text(
+            "✅ Дякуємо за вашу думку!\n"
+            "Ми дуже цінуємо ваш відгук.",
+            parse_mode="HTML",
+        )
+
+        await asyncio.sleep(5)
+
+        try:
+            await call.message.delete()
+        except Exception:
+            pass
+
+    except Exception:
+        pass
+
+
+@router.message(ReviewForm.custom_reason)
+async def process_custom_review_reason(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
+
+    user = message.from_user
+    if user is None:
+        await message.answer("Не вдалося визначити користувача.")
+        return
+
+    text = (message.text or "").strip()
+    if len(text) < 2:
+        await message.answer("Будь ласка, введіть причину більш детально.")
+        return
+
+    data = await state.get_data()
+    order_id = data.get("review_order_id")
+    stars = data.get("review_stars")
+    review_message_chat_id = data.get("review_message_chat_id")
+    review_message_id = data.get("review_message_id")
+
+    if not isinstance(order_id, int) or not isinstance(stars, int):
+        await state.clear()
+        await message.answer("Сталася помилка. Спробуйте залишити відгук ще раз.")
+        return
+
+    order = get_order_by_id_for_user(order_id, user.id)
+    if order is None:
+        await state.clear()
+        await message.answer("Замовлення не знайдено.")
+        return
+
+    if get_review_by_order_id(order_id) is not None:
+        await state.clear()
+        await message.answer("Відгук для цього замовлення вже залишено.")
+        return
+
+    created = create_review(order_id=order_id, telegram_id=user.id, stars=stars, reason=text)
+    if not created:
+        await state.clear()
+        await message.answer("Відгук для цього замовлення вже існує.")
+        return
+
+    await state.clear()
+
+    try:
+        await bot.send_message(
+            REVIEWS_CHAT_ID,
+            build_review_chat_message(order, user, stars, text),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+    except Exception:
+        logging.exception("Failed to send custom review to REVIEWS_CHAT_ID")
+
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    if isinstance(review_message_chat_id, int) and isinstance(review_message_id, int):
+        try:
+            await bot.edit_message_text(
+                chat_id=review_message_chat_id,
+                message_id=review_message_id,
+                text="✅ Дякуємо за вашу думку!\n"
+                     "Ми дуже цінуємо ваш відгук.",
+                parse_mode="HTML",
+            )
+            return
+        except Exception:
+            pass
+
+    await message.answer(
+        "✅ Дякуємо за вашу думку!\n"
+        "Ми дуже цінуємо ваш відгук.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
+# =========================
+# FINAL CONFIRMATION
+# =========================
+async def show_confirmation(message: Message, state: FSMContext):
+    data = await state.get_data()
+    summary = build_client_summary(data)
+
+    confirm_kb = ReplyKeyboardBuilder()
+    confirm_kb.add(KeyboardButton(text="✅ Підтвердити"))
+    confirm_kb.add(KeyboardButton(text="❌ Скасувати"))
+    confirm_kb.adjust(2)
+
+    await message.answer(
+        summary,
+        reply_markup=get_main_edit_keyboard(),
+        parse_mode="HTML",
+    )
+    await message.answer(
+        "Використовуйте кнопки нижче для підтвердження.",
+        reply_markup=confirm_kb.as_markup(resize_keyboard=True),
+    )
+    await state.set_state(Form.confirmation)
+
+
+@router.message(Form.confirmation)
+async def process_confirmation(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
+
+    text = message.text or ""
+
+    if text == "✅ Підтвердити":
+        data = await state.get_data()
+        user = message.from_user
+        if user is None:
+            await message.answer("Помилка: не вдалося отримати інформацію про користувача.")
+            return
+
+        upsert_user(
+            telegram_id=user.id,
+            telegram_full_name=user.full_name or "",
+            telegram_username=user.username or "",
+            customer_name=data.get("customer_name"),
+            phone=data.get("client_phone"),
+        )
+
+        order_id = create_order(user.id, data)
+        increment_user_orders_count(user.id)
+
+        admin_text = build_admin_summary(user, data, order_id)
+
+        await bot.send_message(
+            ADMIN_CHAT_ID,
+            admin_text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+
+        await message.answer(
+            "✅ Заявку прийнято! Очікуйте розрахунок ціни від менеджера.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        await state.clear()
+        return
+
+    if text == "❌ Скасувати":
+        await message.answer(
+            "❌ Заявку скасовано. Щоб створити нову заявку, натисніть /order",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        await state.clear()
+        return
+
+    await message.answer("Будь ласка, використовуйте кнопки для підтвердження.")
+
+# =========================
+# PRICE FLOW
+# =========================
+@router.message(lambda message: message.text and message.text.startswith("/price"))
+async def set_price(message: Message):
+    if not is_admin_chat_message(message):
+        return
+
+    text = message.text or ""
+    parts = text.split()
+
+    if len(parts) < 3:
+        await message.answer("Формат: /price [ID_замовлення] [ціна]")
+        return
+
+    try:
+        order_id = int(parts[1])
+        price = " ".join(parts[2:])
+    except ValueError:
+        await message.answer("Формат: /price [ID_замовлення] [ціна]")
+        return
+
+    order = get_order_by_id(order_id)
+    if order is None:
+        await message.answer(f"❌ Замовлення #{order_id} не знайдено.")
+        return
+
+    client_id = order["telegram_id"]
+    update_order_status_and_price(order_id, status=ORDER_STATUS_PRICE_SENT, price=price)
+
+    try:
+        await bot.send_message(
+            client_id,
+            f"💰 <b>Ціна по замовленню #{order_id}:</b> {html.escape(price)}\n\nПогоджуєтесь з ціною?",
+            reply_markup=build_reply_keyboard(PRICE_CONFIRMATION_TYPES),
+            parse_mode="HTML",
+        )
+        await message.answer(f"✅ Ціну {price} відправлено клієнту (замовлення #{order_id})")
+    except Exception:
+        await message.answer(
+            f"❌ Не вдалося надіслати повідомлення клієнту.\n"
+            "Можливо клієнт заблокував бота."
+        )
+
+
+@router.message(lambda message: message.text in PRICE_CONFIRMATION_TYPES)
+async def process_price_confirmation(message: Message):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
+
+    user = message.from_user
+    if user is None:
+        return
+
+    order = get_pending_price_order(user.id)
+    if order is None:
+        return
+
+    order_id = order["id"]
+    text = message.text or ""
+
+    if text == "Погоджуюсь":
+        update_order_status_and_price(order_id, status=ORDER_STATUS_AGREED)
+
+        await bot.send_message(
+            ADMIN_CHAT_ID,
+            f"✅ <b>Клієнт погодився!</b>\n\n"
+            f"📦 Замовлення: #{order_id}\n"
+            f"👤 Клієнт: {safe_text(user.full_name, 'Не вказано')}\n"
+            f"🆔 ID: {user.id}\n"
+            f"📱 Username: @{html.escape(user.username) if user.username else 'немає'}\n"
+            f"🔗 <a href='tg://user?id={user.id}'>Написати клієнту</a>",
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+        await message.answer(
+            "✅ Дякуємо за погодження!\n\n🚚 Менеджер звʼяжеться, якщо це буде потрібно для уточнення деталей.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return
+
+    if text == "Відмовляюсь":
+        update_order_status_and_price(order_id, status=ORDER_STATUS_DECLINED)
+
+        await bot.send_message(
+            ADMIN_CHAT_ID,
+            f"❌ <b>Клієнт відмовився!</b>\n\n"
+            f"📦 Замовлення: #{order_id}\n"
+            f"👤 Клієнт: {safe_text(user.full_name, 'Не вказано')}\n"
+            f"🆔 ID: {user.id}\n"
+            f"📱 Username: @{html.escape(user.username) if user.username else 'немає'}\n"
+            f"🔗 <a href='tg://user?id={user.id}'>Написати клієнту</a>",
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+        await message.answer(
+            "❌ Заявку скасовано.\n\nЯкщо у вас є питання, зверніться до менеджера.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+
+# =========================
+# MAIN
+# =========================
+if __name__ == "__main__":
+    init_db()
+
+    if BOT_TOKEN == "PASTE_NEW_BOT_TOKEN_HERE":
+        print("Вкажіть новий BOT_TOKEN у коді або через змінну середовища BOT_TOKEN.")
+        sys.exit(1)
+
+    if platform.system() == "Windows":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+    print("Бот запущено...")
+    asyncio.run(dp.start_polling(bot))

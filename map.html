@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+    <title>Вибір адреси</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            background: var(--tg-theme-bg-color, #ffffff);
+            color: var(--tg-theme-text-color, #000000);
+            overflow: hidden;
+        }
+
+        #header {
+            padding: 10px 12px 6px;
+            background: var(--tg-theme-bg-color, #fff);
+            border-bottom: 1px solid rgba(0,0,0,0.08);
+        }
+
+        #mode-label {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--tg-theme-hint-color, #888);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 6px;
+        }
+
+        #search-row {
+            display: flex;
+            gap: 6px;
+            position: relative;
+        }
+
+        #search-input {
+            flex: 1;
+            padding: 9px 12px;
+            border: 1.5px solid rgba(0,0,0,0.12);
+            border-radius: 10px;
+            font-size: 14px;
+            background: var(--tg-theme-secondary-bg-color, #f5f5f5);
+            color: var(--tg-theme-text-color, #000);
+            outline: none;
+        }
+
+        #search-input:focus {
+            border-color: var(--tg-theme-button-color, #2481cc);
+        }
+
+        #search-btn {
+            padding: 9px 14px;
+            background: var(--tg-theme-button-color, #2481cc);
+            color: var(--tg-theme-button-text-color, #fff);
+            border: none;
+            border-radius: 10px;
+            font-size: 16px;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+
+        #suggestions-wrapper {
+            position: relative;
+        }
+
+        #suggestions {
+            display: none;
+            position: absolute;
+            top: 2px;
+            left: 0;
+            right: 0;
+            z-index: 9999;
+            background: var(--tg-theme-bg-color, #fff);
+            border: 1px solid rgba(0,0,0,0.1);
+            border-radius: 10px;
+            max-height: 200px;
+            overflow-y: auto;
+            box-shadow: 0 6px 20px rgba(0,0,0,0.12);
+        }
+
+        .suggestion {
+            padding: 10px 14px;
+            cursor: pointer;
+            font-size: 13px;
+            color: var(--tg-theme-text-color, #000);
+            border-bottom: 1px solid rgba(0,0,0,0.05);
+            line-height: 1.4;
+        }
+
+        .suggestion:last-child { border-bottom: none; }
+        .suggestion:hover, .suggestion:active { background: var(--tg-theme-secondary-bg-color, #f5f5f5); }
+
+        #map {
+            flex: 1;
+            z-index: 1;
+        }
+
+        #info-bar {
+            padding: 10px 14px;
+            background: var(--tg-theme-secondary-bg-color, #f5f5f5);
+            border-top: 1px solid rgba(0,0,0,0.08);
+            min-height: 46px;
+        }
+
+        #address-text {
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--tg-theme-text-color, #000);
+            line-height: 1.4;
+        }
+
+        #address-hint {
+            font-size: 11px;
+            color: var(--tg-theme-hint-color, #888);
+            margin-top: 2px;
+        }
+
+        .leaflet-control-attribution { display: none; }
+    </style>
+</head>
+<body>
+
+<div id="header">
+    <div id="mode-label">📍 Адреса завантаження</div>
+    <div id="search-row">
+        <input id="search-input" type="text" placeholder="Введіть адресу або місто..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" name="map-search-no-auto"/>
+        <button id="search-btn">🔍</button>
+    </div>
+    <div id="suggestions-wrapper">
+        <div id="suggestions"></div>
+    </div>
+</div>
+
+<div id="map"></div>
+
+<div id="info-bar">
+    <div id="address-text">Натисніть на карту або введіть адресу для пошуку</div>
+    <div id="address-hint">Можна тикнути пальцем на будь-яку точку карти</div>
+</div>
+
+<script>
+    const tg = window.Telegram.WebApp;
+    tg.expand();
+    tg.ready();
+    tg.enableClosingConfirmation();
+
+    const params = new URLSearchParams(window.location.search);
+    const mode = params.get('mode') || 'loading';
+
+    document.getElementById('mode-label').textContent =
+        mode === 'loading' ? '📍 Адреса завантаження' : '📍 Адреса розвантаження';
+
+    // Map init — centered on Ukraine
+    const map = L.map('map', { zoomControl: true }).setView([48.3794, 31.1656], 6);
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+    }).addTo(map);
+
+    let marker = null;
+    let selectedAddress = null;
+    let selectedLat = null;
+    let selectedLng = null;
+
+    const pinIcon = L.divIcon({
+        html: mode === 'loading'
+            ? '<div style="font-size:32px;line-height:1;filter:drop-shadow(0 2px 4px rgba(0,0,0,0.3))">🟢</div>'
+            : '<div style="font-size:32px;line-height:1;filter:drop-shadow(0 2px 4px rgba(0,0,0,0.3))">🔴</div>',
+        iconSize: [32, 32],
+        iconAnchor: [16, 16],
+        className: '',
+    });
+
+    function setMarker(lat, lng, address) {
+        if (marker) map.removeLayer(marker);
+        marker = L.marker([lat, lng], { icon: pinIcon }).addTo(map);
+        selectedAddress = address;
+        selectedLat = lat;
+        selectedLng = lng;
+
+        // Shorten for display
+        const parts = address.split(',');
+        const short = parts.slice(0, 3).join(',').trim();
+
+        document.getElementById('address-text').textContent = short;
+        document.getElementById('address-hint').textContent = '✅ Натисніть кнопку нижче щоб підтвердити';
+
+        tg.MainButton.setText(mode === 'loading' ? '✅ Підтвердити завантаження' : '✅ Підтвердити розвантаження');
+        tg.MainButton.show();
+        tg.MainButton.enable();
+    }
+
+    // Tap on map
+    map.on('click', async function (e) {
+        const { lat, lng } = e.latlng;
+        document.getElementById('address-text').textContent = 'Визначаємо адресу...';
+        document.getElementById('address-hint').textContent = '';
+        tg.MainButton.hide();
+
+        try {
+            const res = await fetch(
+                `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&accept-language=uk`,
+                { headers: { 'Accept-Language': 'uk' } }
+            );
+            const data = await res.json();
+            const addr = data.display_name || `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+            setMarker(lat, lng, addr);
+        } catch {
+            setMarker(lat, lng, `${lat.toFixed(5)}, ${lng.toFixed(5)}`);
+        }
+    });
+
+    // Search
+    const searchInput = document.getElementById('search-input');
+    const searchBtn = document.getElementById('search-btn');
+    const suggestionsEl = document.getElementById('suggestions');
+
+    let searchTimeout = null;
+
+    searchInput.addEventListener('input', () => {
+        clearTimeout(searchTimeout);
+        const q = searchInput.value.trim();
+        if (q.length < 3) { suggestionsEl.style.display = 'none'; return; }
+        searchTimeout = setTimeout(() => doSearch(q), 500);
+    });
+
+    searchInput.addEventListener('keydown', e => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            clearTimeout(searchTimeout);
+            doSearch(searchInput.value.trim());
+        }
+    });
+
+    searchBtn.addEventListener('click', () => {
+        clearTimeout(searchTimeout);
+        doSearch(searchInput.value.trim());
+    });
+
+    async function doSearch(q) {
+        if (!q) return;
+        try {
+            const res = await fetch(
+                `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&limit=5&accept-language=uk&countrycodes=ua`,
+                { headers: { 'Accept-Language': 'uk' } }
+            );
+            const results = await res.json();
+
+            if (!results.length) {
+                suggestionsEl.style.display = 'none';
+                return;
+            }
+
+            suggestionsEl.innerHTML = '';
+            results.forEach(r => {
+                const div = document.createElement('div');
+                div.className = 'suggestion';
+                const parts = r.display_name.split(',');
+                div.textContent = parts.slice(0, 4).join(',').trim();
+                div.addEventListener('click', () => {
+                    pickResult(r);
+                    suggestionsEl.style.display = 'none';
+                    searchInput.blur();
+                });
+                suggestionsEl.appendChild(div);
+            });
+            suggestionsEl.style.display = 'block';
+        } catch {
+            document.getElementById('address-text').textContent = '⚠️ Помилка пошуку';
+        }
+    }
+
+    function pickResult(r) {
+        const lat = parseFloat(r.lat);
+        const lng = parseFloat(r.lon);
+        map.setView([lat, lng], 15);
+        setMarker(lat, lng, r.display_name);
+        // строку ввода НЕ меняем — человек сам решает что там написано
+    }
+
+    // Hide suggestions on outside click
+    document.addEventListener('click', e => {
+        if (!suggestionsEl.contains(e.target) && e.target !== searchInput && e.target !== searchBtn) {
+            suggestionsEl.style.display = 'none';
+        }
+    });
+
+    // Main button setup
+    tg.MainButton.setParams({
+        text: 'Виберіть точку на карті',
+        is_active: false,
+        is_visible: false,
+    });
+
+    tg.MainButton.onClick(function () {
+        if (!selectedAddress) return;
+        const payload = JSON.stringify({
+            mode: mode,
+            address: selectedAddress,
+            lat: selectedLat,
+            lng: selectedLng,
+        });
+        tg.sendData(payload);
+        tg.close();
+    });
+</script>
+</body>
+</html>
