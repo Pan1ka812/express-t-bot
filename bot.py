@@ -3446,5 +3446,9 @@ if __name__ == "__main__":
     if platform.system() == "Windows":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-    print("Бот запущено...")
-    asyncio.run(dp.start_polling(bot))
+    async def main():
+        await bot.delete_webhook(drop_pending_updates=True)
+        print("Бот запущено...")
+        await dp.start_polling(bot)
+
+    asyncio.run(main())
