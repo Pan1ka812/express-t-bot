@@ -31,7 +31,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 # =========================
 # CONFIG
 # =========================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "7394588586:AAF6pqDYoCg7ZkesVT1YbAfiQ_3Cc9ZonTU")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "7097415485:AAGHoSQLUEEJVVGppUnj0nNdME2bLo6lymU")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "-4962711861"))
 REVIEWS_CHAT_ID = int(os.getenv("REVIEWS_CHAT_ID", "-5169948092"))
 SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "+380632354243")
@@ -141,12 +141,14 @@ class Form(StatesGroup):
     client_phone_input_choice = State()
     client_phone = State()
     customer_name = State()
+    additional_phones = State()
     loading_phone_choice = State()
     loading_phone = State()
     unloading_phone_choice = State()
     unloading_phone = State()
     payer_type = State()
     payer_details = State()
+    comment_choice = State()
     comment = State()
     oversize_support = State()
     confirmation = State()
@@ -1124,7 +1126,7 @@ def is_valid_customer_name(text: str) -> bool:
 def needs_dimensions(service_type: str, cargo_name: str) -> bool:
     if service_type == "Вантажні перевезення":
         return True
-    return cargo_name in {"Автобус", "Мікроавтобус", "Вантажний авто", "Інше"}
+    return cargo_name == "Інше"
 
 
 def build_reply_keyboard(options: list[str], adjust: int = 2):
@@ -1180,7 +1182,6 @@ def get_edit_fields_keyboard():
 def get_profile_keyboard():
     kb = InlineKeyboardBuilder()
     kb.add(InlineKeyboardButton(text="📦 Мої замовлення", callback_data="profile_orders"))
-    kb.add(InlineKeyboardButton(text="🎁 Бонуси", callback_data="profile_bonus"))
     kb.add(InlineKeyboardButton(text="🚀 Нове замовлення", callback_data="profile_new_order"))
     kb.add(InlineKeyboardButton(text="📞 Підтримка", callback_data="profile_support"))
     kb.adjust(2)
@@ -1266,10 +1267,10 @@ def build_client_summary(data: dict) -> str:
     if data.get("dimensions"):
         lines.append(f"<b>📏 Габарити:</b> {safe_text(data.get('dimensions'))}")
 
-    lines.extend([
-        f"<b>⚖️ Вага:</b> {safe_text(data.get('weight'))}",
-        f"<b>⏰ Терміновість:</b> {safe_text(data.get('urgency_type'))}",
-    ])
+    if data.get("weight"):
+        lines.append(f"<b>⚖️ Вага:</b> {safe_text(data.get('weight'))}")
+
+    lines.append(f"<b>⏰ Терміновість:</b> {safe_text(data.get('urgency_type'))}")
 
     if data.get("urgency_type") == "На інший день":
         lines.append(f"<b>📅 Дата:</b> {safe_text(data.get('scheduled_date'))}")
@@ -1304,7 +1305,6 @@ def build_admin_summary(user: types.User, data: dict, order_id: int) -> str:
 
     profile = get_user_profile(user.id)
     client_tag = profile["client_tag"] if profile else "Новий клієнт"
-    bonus = profile["bonus_percent"] if profile else 0
     orders_count = profile["orders_count"] if profile else 0
     note = profile["note"] if profile else ""
 
@@ -1317,7 +1317,6 @@ def build_admin_summary(user: types.User, data: dict, order_id: int) -> str:
         f"<b>🔗 Посилання:</b> <a href='tg://user?id={user.id}'>Написати клієнту</a>",
         f"<b>⭐ Статус клієнта:</b> {safe_text(client_tag)}",
         f"<b>📦 Замовлень через бота:</b> {orders_count}",
-        f"<b>🎁 Бонус:</b> {bonus}%" if bonus else "<b>🎁 Бонус:</b> немає",
         "",
         f"<b>🚛 Тип послуги:</b> {safe_text(data.get('service_type'))}",
         f"<b>📦 Вантаж:</b> {cargo_label}",
@@ -1332,10 +1331,10 @@ def build_admin_summary(user: types.User, data: dict, order_id: int) -> str:
     if data.get("dimensions"):
         lines.append(f"<b>📏 Габарити:</b> {safe_text(data.get('dimensions'))}")
 
-    lines.extend([
-        f"<b>⚖️ Вага:</b> {safe_text(data.get('weight'))}",
-        f"<b>⏰ Терміновість:</b> {safe_text(data.get('urgency_type'))}",
-    ])
+    if data.get("weight"):
+        lines.append(f"<b>⚖️ Вага:</b> {safe_text(data.get('weight'))}")
+
+    lines.append(f"<b>⏰ Терміновість:</b> {safe_text(data.get('urgency_type'))}")
 
     if data.get("urgency_type") == "На інший день":
         lines.append(f"<b>📅 Дата:</b> {safe_text(data.get('scheduled_date'))}")
@@ -1378,17 +1377,14 @@ def build_admin_summary(user: types.User, data: dict, order_id: int) -> str:
 
 def build_profile_text(profile: dict) -> str:
     customer_name = profile.get("customer_name") or profile.get("telegram_full_name") or "Клієнт"
-    bonus_percent = profile.get("bonus_percent") or 0
-    bonus_line = f"-{bonus_percent}% на наступне замовлення" if bonus_percent > 0 else "немає"
 
     lines = [
         "<b>👤 ПРОФІЛЬ КЛІЄНТА</b>",
         "",
-        f"<b>Ім’я:</b> {safe_text(customer_name)}",
+        f"<b>Ім'я:</b> {safe_text(customer_name)}",
         f"<b>📞 Телефон:</b> {safe_text(profile.get('phone'))}",
         f"<b>⭐ Статус:</b> {safe_text(profile.get('client_tag'), 'Новий клієнт')}",
         f"<b>📦 Замовлень через бота:</b> {profile.get('orders_count', 0)}",
-        f"<b>🎁 Активний бонус:</b> {bonus_line}",
     ]
 
     return "\n".join(lines)
@@ -1486,10 +1482,10 @@ async def finalize_client_phone(message: Message, state: FSMContext, phone: str)
         return
 
     await message.answer(
-        "Як до вас звертатися?\nНаприклад: Андрій",
-        reply_markup=ReplyKeyboardRemove(),
+        "Оберіть тип послуги:",
+        reply_markup=build_reply_keyboard(SERVICE_TYPES),
     )
-    await state.set_state(Form.customer_name)
+    await state.set_state(Form.service_type)
 
 # =========================
 # PROFILE RENDER
@@ -1616,10 +1612,10 @@ async def cmd_order(message: Message, state: FSMContext):
 
     await state.clear()
     await message.answer(
-        "Оберіть тип послуги:",
-        reply_markup=build_reply_keyboard(SERVICE_TYPES),
+        "Як до вас звертатися?\nНаприклад: Андрій",
+        reply_markup=ReplyKeyboardRemove(),
     )
-    await state.set_state(Form.service_type)
+    await state.set_state(Form.customer_name)
 
 # =========================
 # ADMIN COMMANDS
@@ -1689,41 +1685,6 @@ async def banlist_command(message: Message):
     text = "🚫 <b>Заблоковані користувачі:</b>\n\n" + "\n".join(str(uid) for uid in banned)
     await message.answer(text, parse_mode="HTML")
 
-
-@router.message(Command("bonus"))
-async def bonus_command(message: Message):
-    if not is_admin_chat_message(message):
-        return
-
-    parts = (message.text or "").split()
-    if len(parts) != 3:
-        await message.answer("Формат: /bonus [ID_клієнта] [відсоток]")
-        return
-
-    try:
-        user_id = int(parts[1])
-        percent = int(parts[2])
-    except ValueError:
-        await message.answer("Формат: /bonus [ID_клієнта] [відсоток]")
-        return
-
-    if percent < 0 or percent > 100:
-        await message.answer("Відсоток має бути від 0 до 100.")
-        return
-
-    set_user_bonus(user_id, percent)
-    await message.answer(f"🎁 Клієнту {user_id} встановлено бонус {percent}%")
-
-    try:
-        if percent > 0:
-            await bot.send_message(
-                user_id,
-                f"🎁 Вам нараховано бонус -{percent}% на наступне замовлення!"
-            )
-        else:
-            await bot.send_message(user_id, "🎁 Ваш бонус оновлено.")
-    except Exception:
-        pass
 
 
 @router.message(Command("settag"))
@@ -1908,8 +1869,11 @@ async def process_car_brand_model(message: Message, state: FSMContext):
         await state.set_state(Form.dimensions)
         return
 
-    await message.answer("Вкажіть вагу (кг):", reply_markup=ReplyKeyboardRemove())
-    await state.set_state(Form.weight)
+    await message.answer(
+        "На коли потрібно перевезення?",
+        reply_markup=build_reply_keyboard(URGENCY_TYPES),
+    )
+    await state.set_state(Form.urgency_type)
 
 
 @router.message(Form.dimensions)
@@ -2083,14 +2047,15 @@ async def process_scheduled_time(message: Message, state: FSMContext):
     if await deny_if_banned_message(message):
         return
 
-    text = (message.text or "").strip()
+    text = re.sub(r"[.·\-]", ":", (message.text or "").strip())
 
-    if not re.fullmatch(r"\d{2}:\d{2}", text):
+    if not re.fullmatch(r"\d{1,2}:\d{2}", text):
         await message.answer("Невірний формат часу. Введіть у форматі ГГ:ХХ (наприклад, 14:30).")
         return
 
     try:
-        datetime.strptime(text, "%H:%M")
+        parsed = datetime.strptime(text.zfill(5), "%H:%M")
+        text = parsed.strftime("%H:%M")
     except ValueError:
         await message.answer("Невірний час. Введіть у форматі ГГ:ХХ (наприклад, 14:30).")
         return
@@ -2195,8 +2160,11 @@ async def process_unloading_address(message: Message, state: FSMContext):
             await show_confirmation(message, state)
             return
 
-        await ask_for_client_phone_input(message)
-        await state.set_state(Form.client_phone_input_choice)
+        await message.answer(
+            "Чи потрібні додаткові номери на завантаження або вивантаження?",
+            reply_markup=build_reply_keyboard(["✅ Так", "❌ Ні"]),
+        )
+        await state.set_state(Form.additional_phones)
         return
 
     # Ручний ввід тексту
@@ -2216,8 +2184,11 @@ async def process_unloading_address(message: Message, state: FSMContext):
         await show_confirmation(message, state)
         return
 
-    await ask_for_client_phone_input(message)
-    await state.set_state(Form.client_phone_input_choice)
+    await message.answer(
+        "Чи потрібні додаткові номери на завантаження або вивантаження?",
+        reply_markup=build_reply_keyboard(["✅ Так", "❌ Ні"]),
+    )
+    await state.set_state(Form.additional_phones)
 
 
 @router.message(Form.client_phone_input_choice)
@@ -2298,7 +2269,7 @@ async def process_customer_name(message: Message, state: FSMContext):
     text = (message.text or "").strip()
     if not is_valid_customer_name(text):
         await message.answer(
-            "Будь ласка, вкажіть ім’я або ім’я звернення.\n"
+            "Будь ласка, вкажіть ім'я або ім'я звернення.\n"
             "Наприклад: Андрій"
         )
         return
@@ -2311,11 +2282,39 @@ async def process_customer_name(message: Message, state: FSMContext):
         await show_confirmation(message, state)
         return
 
-    await message.answer(
-        "Хто буде на завантаженні?",
-        reply_markup=build_reply_keyboard(LOADING_PHONE_OPTIONS),
-    )
-    await state.set_state(Form.loading_phone_choice)
+    await ask_for_client_phone_input(message)
+    await state.set_state(Form.client_phone_input_choice)
+
+
+@router.message(Form.additional_phones)
+async def process_additional_phones(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
+
+    text = message.text or ""
+    data = await state.get_data()
+    client_phone = data.get("client_phone")
+
+    if text == "❌ Ні":
+        await state.update_data(loading_phone=client_phone, unloading_phone=client_phone)
+        await message.answer(
+            "Оберіть тип платника:",
+            reply_markup=build_reply_keyboard(PAYER_TYPES),
+        )
+        await state.set_state(Form.payer_type)
+        return
+
+    if text == "✅ Так":
+        await message.answer(
+            "Хто буде на завантаженні?",
+            reply_markup=build_reply_keyboard(LOADING_PHONE_OPTIONS),
+        )
+        await state.set_state(Form.loading_phone_choice)
+        return
+
+    await message.answer("Будь ласка, використовуйте кнопки.", reply_markup=build_reply_keyboard(["✅ Так", "❌ Ні"]))
 
 
 @router.message(Form.loading_phone_choice)
@@ -2475,12 +2474,10 @@ async def process_payer_type(message: Message, state: FSMContext):
     if text == "Готівка":
         await state.update_data(payer_type="Готівка", payer_details="-")
         await message.answer(
-            "Бажаєте залишити коментар до заявки?\n\n"
-            "<i>Це поле необов'язкове. Якщо не потрібно — надішліть мінус: -</i>",
-            parse_mode="HTML",
-            reply_markup=ReplyKeyboardRemove(),
+            "Бажаєте додати коментар до замовлення?",
+            reply_markup=build_reply_keyboard(["✅ Так", "❌ Ні"]),
         )
-        await state.set_state(Form.comment)
+        await state.set_state(Form.comment_choice)
         return
 
     if text == "БН":
@@ -2509,12 +2506,35 @@ async def process_payer_details(message: Message, state: FSMContext):
 
     await state.update_data(payer_details=text)
     await message.answer(
-        "Бажаєте залишити коментар до заявки?\n\n"
-        "<i>Це поле необов'язкове. Якщо не потрібно — надішліть мінус: -</i>",
-        parse_mode="HTML",
-        reply_markup=ReplyKeyboardRemove(),
+        "Бажаєте додати коментар до замовлення?",
+        reply_markup=build_reply_keyboard(["✅ Так", "❌ Ні"]),
     )
-    await state.set_state(Form.comment)
+    await state.set_state(Form.comment_choice)
+
+
+@router.message(Form.comment_choice)
+async def process_comment_choice(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
+
+    text = message.text or ""
+
+    if text == "❌ Ні":
+        await state.update_data(comment="")
+        await show_confirmation(message, state)
+        return
+
+    if text == "✅ Так":
+        await message.answer(
+            "Введіть ваш коментар до замовлення:",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        await state.set_state(Form.comment)
+        return
+
+    await message.answer("Будь ласка, використовуйте кнопки.", reply_markup=build_reply_keyboard(["✅ Так", "❌ Ні"]))
 
 
 @router.message(Form.comment)
@@ -2526,15 +2546,14 @@ async def process_comment(message: Message, state: FSMContext):
 
     text = (message.text or "").strip()
 
-    if text != "-" and len(text) > 300:
+    if len(text) > 300:
         await message.answer(
             f"❌ Коментар занадто довгий ({len(text)} символів).\n"
             "Будь ласка, вкажіть коротко — до 300 символів."
         )
         return
 
-    comment = "" if text == "-" else text
-    await state.update_data(comment=comment)
+    await state.update_data(comment=text)
     await show_confirmation(message, state)
 
 # =========================
@@ -2772,47 +2791,6 @@ async def profile_orders_callback(call: CallbackQuery, state: FSMContext):
 
     await state.update_data(profile_orders_extra_message_ids=extra_ids)
 
-@router.callback_query(lambda c: c.data == "profile_bonus")
-async def profile_bonus_callback(call: CallbackQuery):
-    if await deny_if_not_private_callback(call):
-        return
-    if await deny_if_banned_callback(call):
-        return
-
-    await call.answer()
-
-    user = call.from_user
-    if user is None:
-        return
-
-    profile = get_user_profile(user.id)
-
-    if profile is None:
-        await replace_callback_message(
-            call,
-            "Профіль поки що порожній.",
-            reply_markup=get_profile_keyboard(),
-            parse_mode=None,
-        )
-        return
-
-    bonus_percent = profile.get("bonus_percent") or 0
-
-    if bonus_percent > 0:
-        text = (
-            f"🎁 <b>Ваш активний бонус:</b> -{bonus_percent}% на наступне замовлення.\n\n"
-        )
-    else:
-        text = "🎁 У вас поки що немає активного бонусу.\n\n"
-
-    text += f"⭐ <b>Ваш статус:</b> {safe_text(profile.get('client_tag'), 'Новий клієнт')}"
-
-    await replace_callback_message(
-        call,
-        text,
-        reply_markup=get_profile_keyboard(),
-        parse_mode="HTML",
-    )
 
 @router.callback_query(lambda c: c.data == "profile_new_order")
 async def profile_new_order_callback(call: CallbackQuery, state: FSMContext):
@@ -2824,10 +2802,10 @@ async def profile_new_order_callback(call: CallbackQuery, state: FSMContext):
     await call.answer()
     await state.clear()
     await call.message.answer(
-        "Оберіть тип послуги:",
-        reply_markup=build_reply_keyboard(SERVICE_TYPES),
+        "Як до вас звертатися?\nНаприклад: Андрій",
+        reply_markup=ReplyKeyboardRemove(),
     )
-    await state.set_state(Form.service_type)
+    await state.set_state(Form.customer_name)
 
 
 @router.callback_query(lambda c: c.data == "profile_support")
@@ -3333,8 +3311,12 @@ async def process_confirmation(message: Message, state: FSMContext):
         )
 
         await message.answer(
-            "✅ Заявку прийнято! Очікуйте розрахунок ціни від менеджера.",
+            "🎉 <b>Дякуємо за ваше замовлення!</b>\n\n"
+            "✅ Вашу заявку успішно прийнято.\n"
+            "📞 Наш менеджер зателефонує вам найближчим часом для підтвердження деталей.\n\n"
+            "<i>Очікуйте дзвінка!</i>",
             reply_markup=ReplyKeyboardRemove(),
+            parse_mode="HTML",
         )
         await state.clear()
         return
