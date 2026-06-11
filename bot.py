@@ -5,12 +5,15 @@ import logging
 import os
 import platform
 import re
-import sqlite3
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from brands_data import BRAND_ALIASES, GENERIC_VEHICLE_WORDS
+
+import asyncpg
+import gspread
+from google.oauth2.service_account import Credentials
 
 from aiogram import Bot, Dispatcher, Router, types
 from aiogram.filters import Command, CommandStart
@@ -35,10 +38,12 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "7394588586:AAF6pqDYoCg7ZkesVT1YbAfiQ_3Cc9Zon
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "-4962711861"))
 REVIEWS_CHAT_ID = int(os.getenv("REVIEWS_CHAT_ID", "-5169948092"))
 SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "+380632354243")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:fQNrjOfoMjJjOfJSWcuLOzyMQmGlCgJU@postgres.railway.internal:5432/railway")
+GOOGLE_SPREADSHEET_ID = os.getenv("GOOGLE_SPREADSHEET_ID", "1-R4O8AbJ1lwmF-jdBOFMx7nmAOfb_b0Sblhysp0_qGU")
+GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS", "")
 
 BASE_DIR = Path(__file__).resolve().parent
 BANNED_USERS_FILE = BASE_DIR / "banned_users.json"
-DB_PATH = BASE_DIR / "express_t.db"
 MAP_WEBAPP_URL = os.getenv("MAP_WEBAPP_URL", "https://Pan1ka812.github.io/express-t-map/map.html")
 
 logging.basicConfig(level=logging.INFO)
@@ -122,6 +127,7 @@ REVIEW_AVAILABLE_STATUSES = {
 }
 
 MANUAL_PHONE_INPUT_TEXT = "✍️ Ввести інший номер вручну"
+PAGE_SIZE = 5
 
 # =========================
 # FSM
@@ -159,490 +165,335 @@ class ReviewForm(StatesGroup):
     custom_reason = State()
 
 # =========================
-# DATABASE
+# DATABASE (asyncpg / PostgreSQL)
 # =========================
-def get_conn():
-    return sqlite3.connect(DB_PATH)
+_db_pool: Optional[asyncpg.Pool] = None
 
 
-def init_db():
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        telegram_id INTEGER PRIMARY KEY,
-        telegram_full_name TEXT,
-        telegram_username TEXT,
-        customer_name TEXT,
-        phone TEXT,
-        client_tag TEXT DEFAULT 'Новий клієнт',
-        bonus_percent INTEGER DEFAULT 0,
-        note TEXT DEFAULT '',
-        orders_count INTEGER DEFAULT 0,
-        created_at TEXT
-    )
-    """)
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS orders (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        telegram_id INTEGER NOT NULL,
-        customer_name TEXT,
-        service_type TEXT,
-        cargo_name TEXT,
-        custom_cargo_description TEXT,
-        car_brand_model TEXT,
-        dimensions TEXT,
-        weight TEXT,
-        urgency_type TEXT,
-        scheduled_date TEXT,
-        scheduled_time TEXT,
-        loading_address TEXT,
-        unloading_address TEXT,
-        client_phone TEXT,
-        loading_phone TEXT,
-        unloading_phone TEXT,
-        payer_type TEXT,
-        payer_details TEXT,
-        comment TEXT,
-        support_required TEXT,
-        price TEXT,
-        status TEXT,
-        created_at TEXT
-    )
-    """)
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS reviews (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        order_id INTEGER NOT NULL UNIQUE,
-        telegram_id INTEGER NOT NULL,
-        stars INTEGER NOT NULL,
-        reason TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        FOREIGN KEY(order_id) REFERENCES orders(id)
-    )
-    """)
-
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_reviews_telegram_id ON reviews(telegram_id)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_orders_telegram_id ON orders(telegram_id)")
-
-    conn.commit()
-    conn.close()
+async def init_db():
+    global _db_pool
+    _db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
+    async with _db_pool.acquire() as conn:
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            telegram_id BIGINT PRIMARY KEY,
+            telegram_full_name TEXT,
+            telegram_username TEXT,
+            customer_name TEXT,
+            phone TEXT,
+            client_tag TEXT DEFAULT 'Новий клієнт',
+            note TEXT DEFAULT '',
+            orders_count INTEGER DEFAULT 0,
+            created_at TEXT
+        )
+        """)
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS orders (
+            id SERIAL PRIMARY KEY,
+            telegram_id BIGINT NOT NULL,
+            customer_name TEXT,
+            service_type TEXT,
+            cargo_name TEXT,
+            custom_cargo_description TEXT,
+            car_brand_model TEXT,
+            dimensions TEXT,
+            weight TEXT,
+            urgency_type TEXT,
+            scheduled_date TEXT,
+            scheduled_time TEXT,
+            loading_address TEXT,
+            unloading_address TEXT,
+            client_phone TEXT,
+            loading_phone TEXT,
+            unloading_phone TEXT,
+            payer_type TEXT,
+            payer_details TEXT,
+            comment TEXT,
+            support_required TEXT,
+            price TEXT,
+            status TEXT,
+            created_at TEXT
+        )
+        """)
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS reviews (
+            id SERIAL PRIMARY KEY,
+            order_id INTEGER NOT NULL UNIQUE,
+            telegram_id BIGINT NOT NULL,
+            stars INTEGER NOT NULL,
+            reason TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """)
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_reviews_telegram_id ON reviews(telegram_id)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_telegram_id ON orders(telegram_id)")
 
 
-def upsert_user(
+async def upsert_user(
     telegram_id: int,
     telegram_full_name: str,
     telegram_username: str,
     customer_name: Optional[str] = None,
     phone: Optional[str] = None,
 ):
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute(
-        "SELECT telegram_id, customer_name, phone FROM users WHERE telegram_id = ?",
-        (telegram_id,),
-    )
-    row = cur.fetchone()
-
-    now = datetime.now().strftime("%d.%m.%Y %H:%M")
-
-    if row is None:
-        cur.execute("""
-        INSERT INTO users (
-            telegram_id, telegram_full_name, telegram_username, customer_name, phone,
-            client_tag, bonus_percent, note, orders_count, created_at
-        ) VALUES (?, ?, ?, ?, ?, 'Новий клієнт', 0, '', 0, ?)
-        """, (
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT customer_name, phone FROM users WHERE telegram_id = $1",
             telegram_id,
-            telegram_full_name,
-            telegram_username,
-            customer_name or "",
-            phone or "",
-            now,
-        ))
-    else:
-        current_name = row[1] or ""
-        current_phone = row[2] or ""
-        cur.execute("""
-        UPDATE users
-        SET telegram_full_name = ?, telegram_username = ?, customer_name = ?, phone = ?
-        WHERE telegram_id = ?
-        """, (
-            telegram_full_name,
-            telegram_username,
-            customer_name or current_name,
-            phone or current_phone,
-            telegram_id,
-        ))
-
-    conn.commit()
-    conn.close()
-
-
-def increment_user_orders_count(telegram_id: int):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE users SET orders_count = COALESCE(orders_count, 0) + 1 WHERE telegram_id = ?",
-        (telegram_id,),
-    )
-    conn.commit()
-    conn.close()
-
-
-def create_order(telegram_id: int, data: dict) -> int:
-    conn = get_conn()
-    cur = conn.cursor()
-    now = datetime.now().strftime("%d.%m.%Y %H:%M")
-
-    cur.execute("""
-    INSERT INTO orders (
-        telegram_id, customer_name, service_type, cargo_name, custom_cargo_description,
-        car_brand_model, dimensions, weight, urgency_type, scheduled_date, scheduled_time,
-        loading_address, unloading_address, client_phone, loading_phone, unloading_phone,
-        payer_type, payer_details, comment, support_required, price, status, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        telegram_id,
-        data.get("customer_name"),
-        data.get("service_type"),
-        data.get("cargo_name"),
-        data.get("custom_cargo_description"),
-        data.get("car_brand_model"),
-        data.get("dimensions"),
-        data.get("weight"),
-        data.get("urgency_type"),
-        data.get("scheduled_date"),
-        data.get("scheduled_time"),
-        data.get("loading_address"),
-        data.get("unloading_address"),
-        data.get("client_phone"),
-        data.get("loading_phone"),
-        data.get("unloading_phone"),
-        data.get("payer_type"),
-        data.get("payer_details"),
-        data.get("comment"),
-        data.get("support_required"),
-        None,
-        ORDER_STATUS_CREATED,
-        now,
-    ))
-
-    order_id = cur.lastrowid
-    conn.commit()
-    conn.close()
-    return order_id
-
-
-def update_latest_order_for_user(
-    telegram_id: int,
-    status: Optional[str] = None,
-    price: Optional[str] = None,
-):
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute(
-        "SELECT id FROM orders WHERE telegram_id = ? ORDER BY id DESC LIMIT 1",
-        (telegram_id,),
-    )
-    row = cur.fetchone()
-    if row is None:
-        conn.close()
-        return
-
-    order_id = row[0]
-
-    if status is not None and price is not None:
-        cur.execute(
-            "UPDATE orders SET status = ?, price = ? WHERE id = ?",
-            (status, price, order_id),
         )
-    elif status is not None:
-        cur.execute("UPDATE orders SET status = ? WHERE id = ?", (status, order_id))
-    elif price is not None:
-        cur.execute("UPDATE orders SET price = ? WHERE id = ?", (price, order_id))
-
-    conn.commit()
-    conn.close()
-
-
-def get_user_profile(telegram_id: int) -> Optional[dict]:
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute("""
-    SELECT telegram_id, telegram_full_name, telegram_username, customer_name, phone,
-           client_tag, bonus_percent, note, orders_count, created_at
-    FROM users
-    WHERE telegram_id = ?
-    """, (telegram_id,))
-    row = cur.fetchone()
-    conn.close()
-
-    if row is None:
-        return None
-
-    return {
-        "telegram_id": row[0],
-        "telegram_full_name": row[1],
-        "telegram_username": row[2],
-        "customer_name": row[3],
-        "phone": row[4],
-        "client_tag": row[5],
-        "bonus_percent": row[6],
-        "note": row[7],
-        "orders_count": row[8],
-        "created_at": row[9],
-    }
+        now = datetime.now().strftime("%d.%m.%Y %H:%M")
+        if row is None:
+            await conn.execute("""
+            INSERT INTO users (telegram_id, telegram_full_name, telegram_username,
+                customer_name, phone, client_tag, note, orders_count, created_at)
+            VALUES ($1,$2,$3,$4,$5,'Новий клієнт','',0,$6)
+            """, telegram_id, telegram_full_name, telegram_username,
+                customer_name or "", phone or "", now)
+        else:
+            current_name = row["customer_name"] or ""
+            current_phone = row["phone"] or ""
+            await conn.execute("""
+            UPDATE users SET telegram_full_name=$1, telegram_username=$2,
+                customer_name=$3, phone=$4
+            WHERE telegram_id=$5
+            """, telegram_full_name, telegram_username,
+                customer_name or current_name, phone or current_phone, telegram_id)
 
 
-def get_last_orders(telegram_id: int, limit: int = 5) -> list[dict]:
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute("""
-    SELECT id, telegram_id, customer_name, service_type, cargo_name, custom_cargo_description,
-           loading_address, unloading_address, price, status, created_at
-    FROM orders
-    WHERE telegram_id = ?
-    ORDER BY id DESC
-    LIMIT ?
-    """, (telegram_id, limit))
-
-    rows = cur.fetchall()
-    conn.close()
-
-    result: list[dict] = []
-    for row in rows:
-        result.append({
-            "id": row[0],
-            "telegram_id": row[1],
-            "customer_name": row[2],
-            "service_type": row[3],
-            "cargo_name": row[4],
-            "custom_cargo_description": row[5],
-            "loading_address": row[6],
-            "unloading_address": row[7],
-            "price": row[8],
-            "status": row[9],
-            "created_at": row[10],
-        })
-    return result
+async def increment_user_orders_count(telegram_id: int):
+    async with _db_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET orders_count = COALESCE(orders_count,0)+1 WHERE telegram_id=$1",
+            telegram_id,
+        )
 
 
-def get_order_by_id_for_user(order_id: int, telegram_id: int) -> Optional[dict]:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-    SELECT id, telegram_id, customer_name, service_type, cargo_name, custom_cargo_description,
-           loading_address, unloading_address, price, status, created_at
-    FROM orders
-    WHERE id = ? AND telegram_id = ?
-    LIMIT 1
-    """, (order_id, telegram_id))
-    row = cur.fetchone()
-    conn.close()
-
-    if row is None:
-        return None
-
-    return {
-        "id": row[0],
-        "telegram_id": row[1],
-        "customer_name": row[2],
-        "service_type": row[3],
-        "cargo_name": row[4],
-        "custom_cargo_description": row[5],
-        "loading_address": row[6],
-        "unloading_address": row[7],
-        "price": row[8],
-        "status": row[9],
-        "created_at": row[10],
-    }
+async def create_order(telegram_id: int, data: dict) -> int:
+    async with _db_pool.acquire() as conn:
+        now = datetime.now().strftime("%d.%m.%Y %H:%M")
+        row = await conn.fetchrow("""
+        INSERT INTO orders (
+            telegram_id,customer_name,service_type,cargo_name,custom_cargo_description,
+            car_brand_model,dimensions,weight,urgency_type,scheduled_date,scheduled_time,
+            loading_address,unloading_address,client_phone,loading_phone,unloading_phone,
+            payer_type,payer_details,comment,support_required,price,status,created_at
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+        RETURNING id
+        """,
+            telegram_id, data.get("customer_name"), data.get("service_type"),
+            data.get("cargo_name"), data.get("custom_cargo_description"), data.get("car_brand_model"),
+            data.get("dimensions"), data.get("weight"), data.get("urgency_type"),
+            data.get("scheduled_date"), data.get("scheduled_time"), data.get("loading_address"),
+            data.get("unloading_address"), data.get("client_phone"), data.get("loading_phone"),
+            data.get("unloading_phone"), data.get("payer_type"), data.get("payer_details"),
+            data.get("comment"), data.get("support_required"), None, ORDER_STATUS_CREATED, now,
+        )
+        return row["id"]
 
 
-def get_order_by_id(order_id: int) -> Optional[dict]:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-    SELECT id, telegram_id, customer_name, service_type, cargo_name, custom_cargo_description,
-           loading_address, unloading_address, price, status, created_at
-    FROM orders
-    WHERE id = ?
-    LIMIT 1
-    """, (order_id,))
-    row = cur.fetchone()
-    conn.close()
-
-    if row is None:
-        return None
-
-    return {
-        "id": row[0],
-        "telegram_id": row[1],
-        "customer_name": row[2],
-        "service_type": row[3],
-        "cargo_name": row[4],
-        "custom_cargo_description": row[5],
-        "loading_address": row[6],
-        "unloading_address": row[7],
-        "price": row[8],
-        "status": row[9],
-        "created_at": row[10],
-    }
+async def get_user_profile(telegram_id: int) -> Optional[dict]:
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow("""
+        SELECT telegram_id,telegram_full_name,telegram_username,customer_name,phone,
+               client_tag,note,orders_count,created_at
+        FROM users WHERE telegram_id=$1
+        """, telegram_id)
+    return dict(row) if row else None
 
 
-def update_order_status_and_price(order_id: int, status: Optional[str] = None, price: Optional[str] = None):
-    conn = get_conn()
-    cur = conn.cursor()
-
-    if status is not None and price is not None:
-        cur.execute("UPDATE orders SET status = ?, price = ? WHERE id = ?", (status, price, order_id))
-    elif status is not None:
-        cur.execute("UPDATE orders SET status = ? WHERE id = ?", (status, order_id))
-    elif price is not None:
-        cur.execute("UPDATE orders SET price = ? WHERE id = ?", (price, order_id))
-
-    conn.commit()
-    conn.close()
+async def count_user_orders(telegram_id: int) -> int:
+    async with _db_pool.acquire() as conn:
+        val = await conn.fetchval(
+            "SELECT COUNT(*) FROM orders WHERE telegram_id=$1", telegram_id
+        )
+    return val or 0
 
 
-def get_pending_price_order(telegram_id: int) -> Optional[dict]:
-    """Повертає замовлення зі статусом 'Ціну надіслано' для конкретного клієнта."""
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-    SELECT id, telegram_id, customer_name, service_type, status
-    FROM orders
-    WHERE telegram_id = ? AND status = ?
-    ORDER BY id DESC
-    LIMIT 1
-    """, (telegram_id, ORDER_STATUS_PRICE_SENT))
-    row = cur.fetchone()
-    conn.close()
-
-    if row is None:
-        return None
-
-    return {
-        "id": row[0],
-        "telegram_id": row[1],
-        "customer_name": row[2],
-        "service_type": row[3],
-        "status": row[4],
-    }
+async def get_orders_page(telegram_id: int, offset: int, limit: int = 5) -> list[dict]:
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch("""
+        SELECT id,telegram_id,customer_name,service_type,cargo_name,custom_cargo_description,
+               loading_address,unloading_address,price,status,created_at
+        FROM orders WHERE telegram_id=$1 ORDER BY id DESC LIMIT $2 OFFSET $3
+        """, telegram_id, limit, offset)
+    return [dict(r) for r in rows]
 
 
-def get_review_by_order_id(order_id: int) -> Optional[dict]:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-    SELECT id, order_id, telegram_id, stars, reason, created_at
-    FROM reviews
-    WHERE order_id = ?
-    LIMIT 1
-    """, (order_id,))
-    row = cur.fetchone()
-    conn.close()
-
-    if row is None:
-        return None
-
-    return {
-        "id": row[0],
-        "order_id": row[1],
-        "telegram_id": row[2],
-        "stars": row[3],
-        "reason": row[4],
-        "created_at": row[5],
-    }
+async def get_last_orders(telegram_id: int, limit: int = 30) -> list[dict]:
+    return await get_orders_page(telegram_id, offset=0, limit=limit)
 
 
-def get_reviews_map_for_orders(order_ids: list[int]) -> dict[int, dict]:
+async def get_order_by_id_for_user(order_id: int, telegram_id: int) -> Optional[dict]:
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow("""
+        SELECT id,telegram_id,customer_name,service_type,cargo_name,custom_cargo_description,
+               loading_address,unloading_address,price,status,created_at
+        FROM orders WHERE id=$1 AND telegram_id=$2
+        """, order_id, telegram_id)
+    return dict(row) if row else None
+
+
+async def get_full_order_by_id(order_id: int, telegram_id: int) -> Optional[dict]:
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow("""
+        SELECT id,telegram_id,customer_name,service_type,cargo_name,custom_cargo_description,
+               car_brand_model,dimensions,weight,urgency_type,scheduled_date,scheduled_time,
+               loading_address,unloading_address,client_phone,loading_phone,unloading_phone,
+               payer_type,payer_details,comment,support_required,price,status,created_at
+        FROM orders WHERE id=$1 AND telegram_id=$2
+        """, order_id, telegram_id)
+    return dict(row) if row else None
+
+
+async def get_order_by_id(order_id: int) -> Optional[dict]:
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow("""
+        SELECT id,telegram_id,customer_name,service_type,cargo_name,custom_cargo_description,
+               loading_address,unloading_address,price,status,created_at
+        FROM orders WHERE id=$1
+        """, order_id)
+    return dict(row) if row else None
+
+
+async def update_order_status_and_price(order_id: int, status: Optional[str] = None, price: Optional[str] = None):
+    async with _db_pool.acquire() as conn:
+        if status is not None and price is not None:
+            await conn.execute("UPDATE orders SET status=$1,price=$2 WHERE id=$3", status, price, order_id)
+        elif status is not None:
+            await conn.execute("UPDATE orders SET status=$1 WHERE id=$2", status, order_id)
+        elif price is not None:
+            await conn.execute("UPDATE orders SET price=$1 WHERE id=$2", price, order_id)
+
+
+async def get_pending_price_order(telegram_id: int) -> Optional[dict]:
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow("""
+        SELECT id,telegram_id,customer_name,service_type,status
+        FROM orders WHERE telegram_id=$1 AND status=$2 ORDER BY id DESC LIMIT 1
+        """, telegram_id, ORDER_STATUS_PRICE_SENT)
+    return dict(row) if row else None
+
+
+async def get_review_by_order_id(order_id: int) -> Optional[dict]:
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow("""
+        SELECT id,order_id,telegram_id,stars,reason,created_at
+        FROM reviews WHERE order_id=$1
+        """, order_id)
+    return dict(row) if row else None
+
+
+async def get_reviews_map_for_orders(order_ids: list[int]) -> dict[int, dict]:
     if not order_ids:
         return {}
-
-    conn = get_conn()
-    cur = conn.cursor()
-    placeholders = ",".join("?" for _ in order_ids)
-    cur.execute(
-        f"""
-        SELECT id, order_id, telegram_id, stars, reason, created_at
-        FROM reviews
-        WHERE order_id IN ({placeholders})
-        """,
-        order_ids,
-    )
-    rows = cur.fetchall()
-    conn.close()
-
-    result: dict[int, dict] = {}
-    for row in rows:
-        result[row[1]] = {
-            "id": row[0],
-            "order_id": row[1],
-            "telegram_id": row[2],
-            "stars": row[3],
-            "reason": row[4],
-            "created_at": row[5],
-        }
-    return result
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id,order_id,telegram_id,stars,reason,created_at FROM reviews WHERE order_id=ANY($1)",
+            order_ids,
+        )
+    return {row["order_id"]: dict(row) for row in rows}
 
 
-def create_review(order_id: int, telegram_id: int, stars: int, reason: str) -> bool:
-    conn = get_conn()
-    cur = conn.cursor()
+async def create_review(order_id: int, telegram_id: int, stars: int, reason: str) -> bool:
     created_at = datetime.now().strftime("%d.%m.%Y %H:%M")
-
     try:
-        cur.execute("""
-        INSERT INTO reviews (order_id, telegram_id, stars, reason, created_at)
-        VALUES (?, ?, ?, ?, ?)
-        """, (order_id, telegram_id, stars, reason, created_at))
-        conn.commit()
+        async with _db_pool.acquire() as conn:
+            await conn.execute("""
+            INSERT INTO reviews (order_id,telegram_id,stars,reason,created_at)
+            VALUES ($1,$2,$3,$4,$5)
+            """, order_id, telegram_id, stars, reason, created_at)
         return True
-    except sqlite3.IntegrityError:
+    except Exception:
         return False
-    finally:
-        conn.close()
 
 
-def set_user_bonus(telegram_id: int, bonus_percent: int):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE users SET bonus_percent = ? WHERE telegram_id = ?",
-        (bonus_percent, telegram_id),
-    )
-    conn.commit()
-    conn.close()
+async def set_user_tag(telegram_id: int, client_tag: str):
+    async with _db_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET client_tag=$1 WHERE telegram_id=$2", client_tag, telegram_id
+        )
 
 
-def set_user_tag(telegram_id: int, client_tag: str):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE users SET client_tag = ? WHERE telegram_id = ?",
-        (client_tag, telegram_id),
-    )
-    conn.commit()
-    conn.close()
+async def set_user_note(telegram_id: int, note: str):
+    async with _db_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET note=$1 WHERE telegram_id=$2", note, telegram_id
+        )
 
 
-def set_user_note(telegram_id: int, note: str):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE users SET note = ? WHERE telegram_id = ?",
-        (note, telegram_id),
-    )
-    conn.commit()
-    conn.close()
+# =========================
+# GOOGLE SHEETS
+# =========================
+_sheets_client: Optional[gspread.Client] = None
+
+def _get_sheets_client() -> Optional[gspread.Client]:
+    global _sheets_client
+    if not GOOGLE_CREDENTIALS_JSON:
+        return None
+    if _sheets_client is None:
+        try:
+            creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
+            scopes = [
+                "https://spreadsheets.google.com/feeds",
+                "https://www.googleapis.com/auth/drive",
+            ]
+            creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+            _sheets_client = gspread.authorize(creds)
+        except Exception:
+            logging.exception("Failed to init Google Sheets client")
+    return _sheets_client
+
+
+def _write_order_to_sheets_sync(order_id: int, user: types.User, data: dict, profile: Optional[dict]):
+    client = _get_sheets_client()
+    if client is None:
+        return
+    try:
+        sheet = client.open_by_key(GOOGLE_SPREADSHEET_ID).sheet1
+        if sheet.row_count == 0 or not sheet.row_values(1):
+            sheet.append_row([
+                "ID", "Дата", "Telegram ID", "Username", "Ім'я", "Тел. замовника",
+                "Тип послуги", "Вантаж/Тип авто", "Опис вантажу", "Марка/модель",
+                "Габарити", "Вага", "Терміновість", "Дата перевезення", "Час",
+                "Адреса завантаження", "Адреса розвантаження",
+                "Тел. завантаження", "Тел. розвантаження",
+                "Платник", "Деталі платника", "Коментар", "Статус клієнта",
+            ])
+        cargo_label = data.get("cargo_name") or ""
+        if data.get("cargo_name") == "Інше" and data.get("custom_cargo_description"):
+            cargo_label = f"Інше ({data.get('custom_cargo_description')})"
+        sheet.append_row([
+            order_id,
+            datetime.now().strftime("%d.%m.%Y %H:%M"),
+            user.id,
+            f"@{user.username}" if user.username else "",
+            data.get("customer_name") or user.full_name or "",
+            data.get("client_phone") or "",
+            data.get("service_type") or "",
+            cargo_label,
+            data.get("custom_cargo_description") or "",
+            data.get("car_brand_model") or "",
+            data.get("dimensions") or "",
+            data.get("weight") or "",
+            data.get("urgency_type") or "",
+            data.get("scheduled_date") or "",
+            data.get("scheduled_time") or "",
+            data.get("loading_address") or "",
+            data.get("unloading_address") or "",
+            data.get("loading_phone") or "",
+            data.get("unloading_phone") or "",
+            data.get("payer_type") or "",
+            data.get("payer_details") or "",
+            data.get("comment") or "",
+            profile.get("client_tag", "Новий клієнт") if profile else "Новий клієнт",
+        ])
+    except Exception:
+        logging.exception("Failed to write order to Google Sheets")
+
+
+async def write_order_to_sheets(order_id: int, user: types.User, data: dict, profile: Optional[dict]):
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _write_order_to_sheets_sync, order_id, user, data, profile)
 
 # =========================
 # BAN STORAGE
@@ -1298,12 +1149,11 @@ def build_client_summary(data: dict) -> str:
     return "\n".join(lines)
 
 
-def build_admin_summary(user: types.User, data: dict, order_id: int) -> str:
+def build_admin_summary(user: types.User, data: dict, order_id: int, profile: Optional[dict] = None) -> str:
     cargo_label = safe_text(data.get("cargo_name"))
     if data.get("cargo_name") == "Інше" and data.get("custom_cargo_description"):
         cargo_label = f"Інше ({safe_text(data.get('custom_cargo_description'))})"
 
-    profile = get_user_profile(user.id)
     client_tag = profile["client_tag"] if profile else "Новий клієнт"
     orders_count = profile["orders_count"] if profile else 0
     note = profile["note"] if profile else ""
@@ -1491,7 +1341,7 @@ async def finalize_client_phone(message: Message, state: FSMContext, phone: str)
 # PROFILE RENDER
 # =========================
 async def send_profile(message: Message, telegram_id: int):
-    profile = get_user_profile(telegram_id)
+    profile = await get_user_profile(telegram_id)
     if profile is None:
         await message.answer("Профіль поки що порожній. Створіть перше замовлення через /order")
         return
@@ -1527,7 +1377,7 @@ async def cmd_start(message: Message, state: FSMContext):
 
     user = message.from_user
     if user:
-        upsert_user(
+        await upsert_user(
             telegram_id=user.id,
             telegram_full_name=user.full_name or "",
             telegram_username=user.username or "",
@@ -1598,7 +1448,7 @@ async def profile_command(message: Message):
     if user is None:
         return
 
-    upsert_user(
+    await upsert_user(
         telegram_id=user.id,
         telegram_full_name=user.full_name or "",
         telegram_username=user.username or "",
@@ -1711,7 +1561,7 @@ async def settag_command(message: Message):
         await message.answer("Статус занадто короткий.")
         return
 
-    set_user_tag(user_id, tag)
+    await set_user_tag(user_id, tag)
     await message.answer(f"⭐ Клієнту {user_id} встановлено статус: {tag}")
 
 
@@ -1732,7 +1582,7 @@ async def setnote_command(message: Message):
         return
 
     note = parts[2].strip()
-    set_user_note(user_id, note)
+    await set_user_note(user_id, note)
     await message.answer(f"📝 Клієнту {user_id} оновлено примітку.")
 
 # =========================
@@ -2668,33 +2518,14 @@ async def edit_field_callback(call: CallbackQuery, state: FSMContext):
 # =========================
 # PROFILE CALLBACKS
 # =========================
-@router.callback_query(lambda c: c.data == "profile_orders")
-async def profile_orders_callback(call: CallbackQuery, state: FSMContext):
-    if await deny_if_not_private_callback(call):
-        return
-    if await deny_if_banned_callback(call):
-        return
-
-    await call.answer()
+async def _show_orders_page(call: CallbackQuery, offset: int):
     user = call.from_user
     if user is None:
         return
 
-    # Удаляем старые сообщения истории/карточек, если они уже были открыты раньше
-    data = await state.get_data()
-    old_extra_ids = data.get("profile_orders_extra_message_ids", [])
+    total = await count_user_orders(user.id)
 
-    for msg_id in old_extra_ids:
-        try:
-            await bot.delete_message(call.message.chat.id, msg_id)
-        except Exception:
-            pass
-
-    await state.update_data(profile_orders_extra_message_ids=[])
-
-    orders = get_last_orders(user.id, limit=30)
-
-    if not orders:
+    if total == 0:
         await replace_callback_message(
             call,
             "📦 У вас поки що немає заявок через бота.",
@@ -2703,96 +2534,158 @@ async def profile_orders_callback(call: CallbackQuery, state: FSMContext):
         )
         return
 
-    reviews_map = get_reviews_map_for_orders([order["id"] for order in orders])
+    orders = await get_orders_page(user.id, offset=offset, limit=PAGE_SIZE)
+    reviews_map = await get_reviews_map_for_orders([o["id"] for o in orders])
 
-    review_candidates = []
-    for order in orders:
+    page_num = offset // PAGE_SIZE + 1
+    total_pages = (total + PAGE_SIZE - 1) // PAGE_SIZE
+
+    lines = [f"<b>📚 Замовлення (стор. {page_num}/{total_pages}):</b>", ""]
+
+    kb = InlineKeyboardBuilder()
+    repeat_btns = []
+    review_btns = []
+
+    for idx, order in enumerate(orders, start=offset + 1):
+        service = safe_text(order.get("service_type"), "не вказано")
+        loading = safe_text(order.get("loading_address"))
+        unloading = safe_text(order.get("unloading_address"))
+        route = f"📍 {loading} → {unloading}" if (loading != "-" or unloading != "-") else "📍 не вказано"
+
+        status = order.get("status")
+        if status == ORDER_STATUS_AGREED:
+            status_text = "✅ Погоджено"
+        elif status == ORDER_STATUS_DECLINED:
+            status_text = "❌ Відмовлено"
+        elif status == ORDER_STATUS_PRICE_SENT:
+            status_text = "💰 Ціну надіслано"
+        else:
+            status_text = "🆕 Нове"
+
         review = reviews_map.get(order["id"])
-        if review is None and can_leave_review(order):
-            review_candidates.append(order)
-
-    review_candidates = review_candidates[:3]
-    review_ids = {o["id"] for o in review_candidates}
-    remaining_orders = [o for o in orders if o["id"] not in review_ids]
-
-    lines = ["<b>📚 Історія замовлень:</b>", ""]
-
-    if remaining_orders:
-        for idx, order in enumerate(remaining_orders, start=1):
-            service = safe_text(order.get("service_type"), "не вказано")
-
-            loading = safe_text(order.get("loading_address"))
-            unloading = safe_text(order.get("unloading_address"))
-
-            if loading == "-" and unloading == "-":
-                route = "📍 не вказано"
-            else:
-                route = f"📍 {loading} → {unloading}"
-
-            status = order.get("status")
-
-            if status == ORDER_STATUS_AGREED:
-                status_text = "✅ Ви погодилися з ціною"
-            elif status == ORDER_STATUS_DECLINED:
-                status_text = "❌ Ви відмовилися від ціни"
-            elif status == ORDER_STATUS_PRICE_SENT:
-                status_text = "💰 Ціну надіслано"
-            elif status == ORDER_STATUS_CREATED:
-                status_text = "🆕 Заявку створено"
-            else:
-                status_text = safe_text(status)
-
-            review = reviews_map.get(order["id"])
-
-            if review is not None:
-                review_text = "😄 Ви залишили відгук"
-            else:
-                review_text = "😔 Ви не залишили відгук"
-
-            lines.append(
-                f"<b>{idx}.</b> 🚚 Замовлення #{order['id']}\n"
-                f"🛠 Послуга: {service}\n"
-                f"{route}\n"
-                f"📊 Статус: {status_text}\n"
-                f"🕒 Дата: {safe_text(order.get('created_at'))}"
-            )
-
-            if order.get("price"):
-                lines.append(f"💰 Ціна: {safe_text(order.get('price'))}")
-
-            lines.append(review_text)
-            lines.append("──────────")
-            lines.append("")
-    else:
-        lines.append("Історія замовлень поки що порожня.")
+        line = (
+            f"<b>{idx}.</b> 🚚 <b>#{order['id']}</b> — {service}\n"
+            f"{route}\n"
+            f"📊 {status_text}  🕒 {safe_text(order.get('created_at'))}"
+        )
+        if order.get("price"):
+            line += f"\n💰 {safe_text(order.get('price'))}"
+        if review:
+            line += "\n😄 Відгук залишено"
+        lines.append(line)
+        lines.append("──────────")
         lines.append("")
 
-    if review_candidates:
-        lines.append("<b>⬇️ Нижче ви можете залишити відгук по останніх замовленнях.</b>")
-    else:
-        lines.append("Наразі немає замовлень, для яких потрібно залишити відгук.")
+        repeat_btns.append(InlineKeyboardButton(
+            text=f"🔄 Повторити #{order['id']}",
+            callback_data=f"repeat_order:{order['id']}",
+        ))
 
-    big_text = "\n".join(lines)
+        if review is None and can_leave_review(order):
+            review_btns.append(InlineKeyboardButton(
+                text=f"⭐ Відгук #{order['id']}",
+                callback_data=f"review_leave:{order['id']}",
+            ))
 
-    await replace_callback_message(
-        call,
-        big_text,
-        reply_markup=get_history_actions_keyboard(),
-        parse_mode="HTML",
+    for btn in repeat_btns:
+        kb.add(btn)
+
+    nav_btns = []
+    if offset > 0:
+        nav_btns.append(InlineKeyboardButton(text="◀️", callback_data=f"orders_page:{offset - PAGE_SIZE}"))
+    if offset + PAGE_SIZE < total:
+        nav_btns.append(InlineKeyboardButton(text="▶️", callback_data=f"orders_page:{offset + PAGE_SIZE}"))
+    for btn in nav_btns:
+        kb.add(btn)
+
+    for btn in review_btns:
+        kb.add(btn)
+
+    kb.add(InlineKeyboardButton(text="⬅️ Назад до профілю", callback_data="history_back_to_profile"))
+
+    adjust = [1] * len(repeat_btns)
+    if nav_btns:
+        adjust.append(len(nav_btns))
+    for _ in review_btns:
+        adjust.append(1)
+    adjust.append(1)
+    kb.adjust(*adjust)
+
+    await replace_callback_message(call, "\n".join(lines), reply_markup=kb.as_markup(), parse_mode="HTML")
+
+
+@router.callback_query(lambda c: c.data == "profile_orders")
+async def profile_orders_callback(call: CallbackQuery, state: FSMContext):
+    if await deny_if_not_private_callback(call):
+        return
+    if await deny_if_banned_callback(call):
+        return
+    await call.answer()
+    await _show_orders_page(call, offset=0)
+
+
+@router.callback_query(lambda c: c.data.startswith("orders_page:"))
+async def orders_page_callback(call: CallbackQuery, state: FSMContext):
+    if await deny_if_not_private_callback(call):
+        return
+    if await deny_if_banned_callback(call):
+        return
+    await call.answer()
+    try:
+        offset = int(call.data.split(":")[1])
+    except (IndexError, ValueError):
+        return
+    await _show_orders_page(call, offset=max(0, offset))
+
+
+@router.callback_query(lambda c: c.data.startswith("repeat_order:"))
+async def repeat_order_callback(call: CallbackQuery, state: FSMContext):
+    if await deny_if_not_private_callback(call):
+        return
+    if await deny_if_banned_callback(call):
+        return
+
+    user = call.from_user
+    if user is None:
+        await call.answer("Не вдалося визначити користувача.", show_alert=True)
+        return
+
+    try:
+        order_id = int(call.data.split(":")[1])
+    except (IndexError, ValueError):
+        await call.answer("Помилка даних.", show_alert=True)
+        return
+
+    order = await get_full_order_by_id(order_id, user.id)
+    if order is None:
+        await call.answer("Замовлення не знайдено.", show_alert=True)
+        return
+
+    await state.clear()
+    await state.update_data(
+        customer_name=order.get("customer_name"),
+        client_phone=order.get("client_phone"),
+        service_type=order.get("service_type"),
+        cargo_name=order.get("cargo_name"),
+        custom_cargo_description=order.get("custom_cargo_description"),
+        car_brand_model=order.get("car_brand_model"),
+        dimensions=order.get("dimensions"),
+        weight=order.get("weight"),
+        urgency_type=order.get("urgency_type"),
+        scheduled_date=order.get("scheduled_date"),
+        scheduled_time=order.get("scheduled_time"),
+        loading_address=order.get("loading_address"),
+        unloading_address=order.get("unloading_address"),
+        loading_phone=order.get("loading_phone"),
+        unloading_phone=order.get("unloading_phone"),
+        payer_type=order.get("payer_type"),
+        payer_details=order.get("payer_details"),
+        comment=order.get("comment"),
+        support_required=order.get("support_required"),
     )
 
-    extra_ids = []
-
-    for order in review_candidates:
-        review = reviews_map.get(order["id"])
-        sent = await call.message.answer(
-            build_order_card_text(order, review),
-            parse_mode="HTML",
-            reply_markup=get_order_review_keyboard(order, review),
-        )
-        extra_ids.append(sent.message_id)
-
-    await state.update_data(profile_orders_extra_message_ids=extra_ids)
+    await call.answer()
+    await show_confirmation(call.message, state)
 
 
 @router.callback_query(lambda c: c.data == "profile_new_order")
@@ -2865,7 +2758,7 @@ async def history_back_to_profile_callback(call: CallbackQuery, state: FSMContex
     if user is None:
         return
 
-    profile = get_user_profile(user.id)
+    profile = await get_user_profile(user.id)
     if profile is None:
         await replace_callback_message(
             call,
@@ -2935,7 +2828,7 @@ async def review_leave_callback(call: CallbackQuery, state: FSMContext):
         await call.answer("Помилка даних.", show_alert=True)
         return
 
-    order = get_order_by_id_for_user(order_id, user.id)
+    order = await get_order_by_id_for_user(order_id, user.id)
     if order is None:
         await call.answer("Замовлення не знайдено.", show_alert=True)
         return
@@ -2944,7 +2837,7 @@ async def review_leave_callback(call: CallbackQuery, state: FSMContext):
         await call.answer("Відгук поки недоступний для цього замовлення.", show_alert=True)
         return
 
-    existing_review = get_review_by_order_id(order_id)
+    existing_review = await get_review_by_order_id(order_id)
     if existing_review is not None:
         await call.answer("Відгук уже залишено.", show_alert=True)
         return
@@ -2990,12 +2883,12 @@ async def review_stars_callback(call: CallbackQuery, state: FSMContext):
         await call.answer("Некоректна оцінка.", show_alert=True)
         return
 
-    order = get_order_by_id_for_user(order_id, user.id)
+    order = await get_order_by_id_for_user(order_id, user.id)
     if order is None:
         await call.answer("Замовлення не знайдено.", show_alert=True)
         return
 
-    if get_review_by_order_id(order_id) is not None:
+    if await get_review_by_order_id(order_id) is not None:
         await call.answer("Відгук уже залишено.", show_alert=True)
         return
 
@@ -3007,7 +2900,7 @@ async def review_stars_callback(call: CallbackQuery, state: FSMContext):
     )
 
     if stars >= 4:
-        created = create_review(
+        created = await create_review(
             order_id=order_id,
             telegram_id=user.id,
             stars=stars,
@@ -3108,12 +3001,12 @@ async def review_reason_callback(call: CallbackQuery, state: FSMContext):
         await call.answer("Помилка даних.", show_alert=True)
         return
 
-    order = get_order_by_id_for_user(order_id, user.id)
+    order = await get_order_by_id_for_user(order_id, user.id)
     if order is None:
         await call.answer("Замовлення не знайдено.", show_alert=True)
         return
 
-    if get_review_by_order_id(order_id) is not None:
+    if await get_review_by_order_id(order_id) is not None:
         await call.answer("Відгук уже залишено.", show_alert=True)
         return
 
@@ -3133,7 +3026,7 @@ async def review_reason_callback(call: CallbackQuery, state: FSMContext):
 
         return
 
-    created = create_review(order_id=order_id, telegram_id=user.id, stars=stars, reason=reason)
+    created = await create_review(order_id=order_id, telegram_id=user.id, stars=stars, reason=reason)
 
     if not created:
         await call.answer("Відгук уже існує.", show_alert=True)
@@ -3200,18 +3093,18 @@ async def process_custom_review_reason(message: Message, state: FSMContext):
         await message.answer("Сталася помилка. Спробуйте залишити відгук ще раз.")
         return
 
-    order = get_order_by_id_for_user(order_id, user.id)
+    order = await get_order_by_id_for_user(order_id, user.id)
     if order is None:
         await state.clear()
         await message.answer("Замовлення не знайдено.")
         return
 
-    if get_review_by_order_id(order_id) is not None:
+    if await get_review_by_order_id(order_id) is not None:
         await state.clear()
         await message.answer("Відгук для цього замовлення вже залишено.")
         return
 
-    created = create_review(order_id=order_id, telegram_id=user.id, stars=stars, reason=text)
+    created = await create_review(order_id=order_id, telegram_id=user.id, stars=stars, reason=text)
     if not created:
         await state.clear()
         await message.answer("Відгук для цього замовлення вже існує.")
@@ -3293,7 +3186,7 @@ async def process_confirmation(message: Message, state: FSMContext):
             await message.answer("Помилка: не вдалося отримати інформацію про користувача.")
             return
 
-        upsert_user(
+        await upsert_user(
             telegram_id=user.id,
             telegram_full_name=user.full_name or "",
             telegram_username=user.username or "",
@@ -3301,10 +3194,13 @@ async def process_confirmation(message: Message, state: FSMContext):
             phone=data.get("client_phone"),
         )
 
-        order_id = create_order(user.id, data)
-        increment_user_orders_count(user.id)
+        order_id = await create_order(user.id, data)
+        await increment_user_orders_count(user.id)
 
-        admin_text = build_admin_summary(user, data, order_id)
+        profile = await get_user_profile(user.id)
+        admin_text = build_admin_summary(user, data, order_id, profile=profile)
+
+        asyncio.create_task(write_order_to_sheets(order_id, user, data, profile))
 
         await bot.send_message(
             ADMIN_CHAT_ID,
@@ -3356,13 +3252,13 @@ async def set_price(message: Message):
         await message.answer("Формат: /price [ID_замовлення] [ціна]")
         return
 
-    order = get_order_by_id(order_id)
+    order = await get_order_by_id(order_id)
     if order is None:
         await message.answer(f"❌ Замовлення #{order_id} не знайдено.")
         return
 
     client_id = order["telegram_id"]
-    update_order_status_and_price(order_id, status=ORDER_STATUS_PRICE_SENT, price=price)
+    await update_order_status_and_price(order_id, status=ORDER_STATUS_PRICE_SENT, price=price)
 
     try:
         await bot.send_message(
@@ -3390,7 +3286,7 @@ async def process_price_confirmation(message: Message):
     if user is None:
         return
 
-    order = get_pending_price_order(user.id)
+    order = await get_pending_price_order(user.id)
     if order is None:
         return
 
@@ -3398,7 +3294,7 @@ async def process_price_confirmation(message: Message):
     text = message.text or ""
 
     if text == "Погоджуюсь":
-        update_order_status_and_price(order_id, status=ORDER_STATUS_AGREED)
+        await update_order_status_and_price(order_id, status=ORDER_STATUS_AGREED)
 
         await bot.send_message(
             ADMIN_CHAT_ID,
@@ -3418,7 +3314,7 @@ async def process_price_confirmation(message: Message):
         return
 
     if text == "Відмовляюсь":
-        update_order_status_and_price(order_id, status=ORDER_STATUS_DECLINED)
+        await update_order_status_and_price(order_id, status=ORDER_STATUS_DECLINED)
 
         await bot.send_message(
             ADMIN_CHAT_ID,
@@ -3440,8 +3336,6 @@ async def process_price_confirmation(message: Message):
 # MAIN
 # =========================
 if __name__ == "__main__":
-    init_db()
-
     if BOT_TOKEN == "PASTE_NEW_BOT_TOKEN_HERE":
         print("Вкажіть новий BOT_TOKEN у коді або через змінну середовища BOT_TOKEN.")
         sys.exit(1)
@@ -3450,6 +3344,7 @@ if __name__ == "__main__":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
     async def main():
+        await init_db()
         await bot.delete_webhook(drop_pending_updates=True)
         await bot.set_my_commands([
             types.BotCommand(command="start", description="Головне меню"),
