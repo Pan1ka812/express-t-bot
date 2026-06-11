@@ -99,14 +99,6 @@ UNLOADING_PHONE_OPTIONS = [
 ]
 
 
-REVIEW_REASON_OPTIONS = [
-    "Дорого",
-    "Довго",
-    "Стан авто",
-    "Водій",
-    "Інше",
-]
-
 ADDRESS_HINT_WORDS = {
     "вул", "вулиця", "ул", "улица", "просп", "проспект", "пр", "пров",
     "переулок", "пер", "бульвар", "бул", "площа", "пл", "шосе", "дорога",
@@ -121,10 +113,6 @@ ORDER_STATUS_CREATED = "Створено"
 ORDER_STATUS_PRICE_SENT = "Ціну надіслано"
 ORDER_STATUS_AGREED = "Клієнт погодився"
 ORDER_STATUS_DECLINED = "Клієнт відмовився"
-
-REVIEW_AVAILABLE_STATUSES = {
-    ORDER_STATUS_AGREED,
-}
 
 MANUAL_PHONE_INPUT_TEXT = "✍️ Ввести інший номер вручну"
 PAGE_SIZE = 5
@@ -159,10 +147,6 @@ class Form(StatesGroup):
     oversize_support = State()
     confirmation = State()
 
-
-class ReviewForm(StatesGroup):
-    rating = State()
-    custom_reason = State()
 
 # =========================
 # DATABASE (asyncpg / PostgreSQL)
@@ -372,39 +356,6 @@ async def get_pending_price_order(telegram_id: int) -> Optional[dict]:
         FROM orders WHERE telegram_id=$1 AND status=$2 ORDER BY id DESC LIMIT 1
         """, telegram_id, ORDER_STATUS_PRICE_SENT)
     return dict(row) if row else None
-
-
-async def get_review_by_order_id(order_id: int) -> Optional[dict]:
-    async with _db_pool.acquire() as conn:
-        row = await conn.fetchrow("""
-        SELECT id,order_id,telegram_id,stars,reason,created_at
-        FROM reviews WHERE order_id=$1
-        """, order_id)
-    return dict(row) if row else None
-
-
-async def get_reviews_map_for_orders(order_ids: list[int]) -> dict[int, dict]:
-    if not order_ids:
-        return {}
-    async with _db_pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT id,order_id,telegram_id,stars,reason,created_at FROM reviews WHERE order_id=ANY($1)",
-            order_ids,
-        )
-    return {row["order_id"]: dict(row) for row in rows}
-
-
-async def create_review(order_id: int, telegram_id: int, stars: int, reason: str) -> bool:
-    created_at = datetime.now().strftime("%d.%m.%Y %H:%M")
-    try:
-        async with _db_pool.acquire() as conn:
-            await conn.execute("""
-            INSERT INTO reviews (order_id,telegram_id,stars,reason,created_at)
-            VALUES ($1,$2,$3,$4,$5)
-            """, order_id, telegram_id, stars, reason, created_at)
-        return True
-    except Exception:
-        return False
 
 
 async def set_user_tag(telegram_id: int, client_tag: str):
@@ -1051,54 +1002,6 @@ def get_history_actions_keyboard():
     kb.adjust(1)
     return kb.as_markup()
 
-def get_review_stars_keyboard(order_id: int):
-    kb = InlineKeyboardBuilder()
-    for stars in range(1, 6):
-        kb.add(
-            InlineKeyboardButton(
-                text="⭐" * stars,
-                callback_data=f"review_stars:{order_id}:{stars}",
-            )
-        )
-    kb.add(InlineKeyboardButton(text="❌ Скасувати", callback_data="review_cancel"))
-    kb.adjust(1)
-    return kb.as_markup()
-
-
-def get_review_reasons_keyboard(order_id: int, stars: int):
-    kb = InlineKeyboardBuilder()
-    reason_codes = {
-        "Дорого": "expensive",
-        "Довго": "slow",
-        "Стан авто": "car_state",
-        "Водій": "driver",
-        "Інше": "other",
-    }
-    for reason in REVIEW_REASON_OPTIONS:
-        kb.add(
-            InlineKeyboardButton(
-                text=reason,
-                callback_data=f"review_reason:{order_id}:{stars}:{reason_codes[reason]}",
-            )
-        )
-    kb.add(InlineKeyboardButton(text="❌ Скасувати", callback_data="review_cancel"))
-    kb.adjust(2)
-    return kb.as_markup()
-
-
-def get_order_review_keyboard(order: dict, review: Optional[dict]):
-    kb = InlineKeyboardBuilder()
-
-    if review is not None:
-        kb.add(InlineKeyboardButton(text="✅ Відгук залишено", callback_data="review_done"))
-    elif order.get("status") in REVIEW_AVAILABLE_STATUSES:
-        kb.add(InlineKeyboardButton(text="⭐ Залишити відгук", callback_data=f"review_leave:{order['id']}"))
-    else:
-        kb.add(InlineKeyboardButton(text="⏳ Відгук недоступний", callback_data="review_unavailable"))
-
-    return kb.as_markup()
-
-
 def build_client_summary(data: dict) -> str:
     cargo_label = safe_text(data.get("cargo_name"))
     if data.get("cargo_name") == "Інше" and data.get("custom_cargo_description"):
@@ -1238,74 +1141,6 @@ def build_profile_text(profile: dict) -> str:
     ]
 
     return "\n".join(lines)
-
-
-def can_leave_review(order: dict) -> bool:
-    return order.get("status") in REVIEW_AVAILABLE_STATUSES
-
-
-def build_order_card_text(order: dict, review: Optional[dict]) -> str:
-    service = safe_text(order.get("service_type"), "не вказано")
-
-    loading = safe_text(order.get("loading_address"))
-    unloading = safe_text(order.get("unloading_address"))
-
-    if loading == "-" and unloading == "-":
-        route = "📍 не вказано"
-    else:
-        route = f"📍 {loading} → {unloading}"
-
-    status = order.get("status")
-
-    if status == ORDER_STATUS_AGREED:
-        status_text = "✅ Ви погодилися з ціною"
-    elif status == ORDER_STATUS_DECLINED:
-        status_text = "❌ Ви відмовилися від ціни"
-    elif status == ORDER_STATUS_PRICE_SENT:
-        status_text = "💰 Ціну надіслано"
-    elif status == ORDER_STATUS_CREATED:
-        status_text = "🆕 Заявку створено"
-    else:
-        status_text = safe_text(status)
-
-    lines = [
-        f"<b>🚚 Замовлення #{order['id']}</b>",
-        f"🛠 Послуга: {service}",
-        route,
-        f"📊 Статус: {status_text}",
-        f"🕒 Дата: {safe_text(order.get('created_at'))}",
-    ]
-
-    if order.get("price"):
-        lines.append(f"💰 Ціна: {safe_text(order.get('price'))}")
-
-    lines.append("😔 Ви не залишили відгук")
-    lines.append("")
-    lines.append("⭐ Натисніть кнопку нижче, щоб залишити відгук")
-    lines.append("──────────")
-
-    return "\n".join(lines)
-
-
-def build_review_chat_message(order: dict, user: types.User, stars: int, reason: str) -> str:
-    marker = "🟢 Позитивний відгук" if stars >= 4 else "🔴 Негативний відгук"
-    customer_name = order.get("customer_name") or user.full_name or "Не вказано"
-    username = f"@{html.escape(user.username)}" if user.username else "немає"
-    created_at = datetime.now().strftime("%d.%m.%Y %H:%M")
-
-    return "\n".join([
-        f"<b>{marker}</b>",
-        "",
-        f"<b>Замовлення:</b> #{order['id']}",
-        f"<b>Клієнт:</b> {safe_text(customer_name)}",
-        f"<b>Telegram ID:</b> {user.id}",
-        f"<b>Username:</b> {username}",
-        f"<b>Тип послуги:</b> {safe_text(order.get('service_type'))}",
-        f"<b>Маршрут:</b> {safe_text(order.get('loading_address'))} → {safe_text(order.get('unloading_address'))}",
-        f"<b>Оцінка:</b> {'⭐' * stars}",
-        f"<b>Причина:</b> {safe_text(reason)}",
-        f"<b>Дата відгуку:</b> {created_at}",
-    ])
 
 
 async def ask_for_client_phone_input(message: Message, edit_mode: bool = False):
@@ -2535,7 +2370,6 @@ async def _show_orders_page(call: CallbackQuery, offset: int):
         return
 
     orders = await get_orders_page(user.id, offset=offset, limit=PAGE_SIZE)
-    reviews_map = await get_reviews_map_for_orders([o["id"] for o in orders])
 
     page_num = offset // PAGE_SIZE + 1
     total_pages = (total + PAGE_SIZE - 1) // PAGE_SIZE
@@ -2544,7 +2378,6 @@ async def _show_orders_page(call: CallbackQuery, offset: int):
 
     kb = InlineKeyboardBuilder()
     repeat_btns = []
-    review_btns = []
 
     for idx, order in enumerate(orders, start=offset + 1):
         service = safe_text(order.get("service_type"), "не вказано")
@@ -2562,7 +2395,6 @@ async def _show_orders_page(call: CallbackQuery, offset: int):
         else:
             status_text = "🆕 Нове"
 
-        review = reviews_map.get(order["id"])
         line = (
             f"<b>{idx}.</b> 🚚 <b>#{order['id']}</b> — {service}\n"
             f"{route}\n"
@@ -2570,8 +2402,6 @@ async def _show_orders_page(call: CallbackQuery, offset: int):
         )
         if order.get("price"):
             line += f"\n💰 {safe_text(order.get('price'))}"
-        if review:
-            line += "\n😄 Відгук залишено"
         lines.append(line)
         lines.append("──────────")
         lines.append("")
@@ -2580,12 +2410,6 @@ async def _show_orders_page(call: CallbackQuery, offset: int):
             text=f"🔄 Повторити #{order['id']}",
             callback_data=f"repeat_order:{order['id']}",
         ))
-
-        if review is None and can_leave_review(order):
-            review_btns.append(InlineKeyboardButton(
-                text=f"⭐ Відгук #{order['id']}",
-                callback_data=f"review_leave:{order['id']}",
-            ))
 
     for btn in repeat_btns:
         kb.add(btn)
@@ -2598,16 +2422,11 @@ async def _show_orders_page(call: CallbackQuery, offset: int):
     for btn in nav_btns:
         kb.add(btn)
 
-    for btn in review_btns:
-        kb.add(btn)
-
     kb.add(InlineKeyboardButton(text="⬅️ Назад до профілю", callback_data="history_back_to_profile"))
 
     adjust = [1] * len(repeat_btns)
     if nav_btns:
         adjust.append(len(nav_btns))
-    for _ in review_btns:
-        adjust.append(1)
     adjust.append(1)
     kb.adjust(*adjust)
 
@@ -2743,17 +2562,6 @@ async def history_back_to_profile_callback(call: CallbackQuery, state: FSMContex
 
     await call.answer()
 
-    data = await state.get_data()
-    extra_ids = data.get("profile_orders_extra_message_ids", [])
-
-    for msg_id in extra_ids:
-        try:
-            await bot.delete_message(call.message.chat.id, msg_id)
-        except Exception:
-            pass
-
-    await state.update_data(profile_orders_extra_message_ids=[])
-
     user = call.from_user
     if user is None:
         return
@@ -2773,377 +2581,6 @@ async def history_back_to_profile_callback(call: CallbackQuery, state: FSMContex
         build_profile_text(profile),
         reply_markup=get_profile_keyboard(),
         parse_mode="HTML",
-    )
-
-# =========================
-# REVIEW FLOW
-# =========================
-@router.callback_query(lambda c: c.data == "review_done")
-async def review_done_callback(call: CallbackQuery):
-    if await deny_if_not_private_callback(call):
-        return
-    if await deny_if_banned_callback(call):
-        return
-
-    await call.answer("Відгук уже залишено.", show_alert=False)
-
-
-@router.callback_query(lambda c: c.data == "review_unavailable")
-async def review_unavailable_callback(call: CallbackQuery):
-    if await deny_if_not_private_callback(call):
-        return
-    if await deny_if_banned_callback(call):
-        return
-
-    await call.answer("Відгук поки недоступний для цього замовлення.", show_alert=True)
-
-
-@router.callback_query(lambda c: c.data == "review_cancel")
-async def review_cancel_callback(call: CallbackQuery, state: FSMContext):
-    if await deny_if_not_private_callback(call):
-        return
-    if await deny_if_banned_callback(call):
-        return
-
-    await state.clear()
-    await call.answer("Залишення відгуку скасовано.")
-    await call.message.answer("Відгук скасовано.")
-
-
-@router.callback_query(lambda c: c.data.startswith("review_leave:"))
-async def review_leave_callback(call: CallbackQuery, state: FSMContext):
-    if await deny_if_not_private_callback(call):
-        return
-    if await deny_if_banned_callback(call):
-        return
-
-    user = call.from_user
-    if user is None:
-        await call.answer("Не вдалося визначити користувача.", show_alert=True)
-        return
-
-    try:
-        order_id = int(call.data.split(":")[1])
-    except (IndexError, ValueError):
-        await call.answer("Помилка даних.", show_alert=True)
-        return
-
-    order = await get_order_by_id_for_user(order_id, user.id)
-    if order is None:
-        await call.answer("Замовлення не знайдено.", show_alert=True)
-        return
-
-    if not can_leave_review(order):
-        await call.answer("Відгук поки недоступний для цього замовлення.", show_alert=True)
-        return
-
-    existing_review = await get_review_by_order_id(order_id)
-    if existing_review is not None:
-        await call.answer("Відгук уже залишено.", show_alert=True)
-        return
-
-    await state.clear()
-    await state.set_state(ReviewForm.rating)
-    await state.update_data(review_order_id=order_id)
-
-    await call.answer()
-    await replace_callback_message(
-        call,
-        f"Оцініть замовлення #{order_id}:\nОберіть кількість зірок.",
-        reply_markup=get_review_stars_keyboard(order_id),
-        parse_mode=None,
-    )     
-
-
-@router.callback_query(lambda c: c.data.startswith("review_stars:"))
-async def review_stars_callback(call: CallbackQuery, state: FSMContext):
-    if await deny_if_not_private_callback(call):
-        return
-    if await deny_if_banned_callback(call):
-        return
-
-    user = call.from_user
-    if user is None:
-        await call.answer("Не вдалося визначити користувача.", show_alert=True)
-        return
-
-    parts = call.data.split(":")
-    if len(parts) != 3:
-        await call.answer("Помилка даних.", show_alert=True)
-        return
-
-    try:
-        order_id = int(parts[1])
-        stars = int(parts[2])
-    except ValueError:
-        await call.answer("Помилка даних.", show_alert=True)
-        return
-
-    if stars < 1 or stars > 5:
-        await call.answer("Некоректна оцінка.", show_alert=True)
-        return
-
-    order = await get_order_by_id_for_user(order_id, user.id)
-    if order is None:
-        await call.answer("Замовлення не знайдено.", show_alert=True)
-        return
-
-    if await get_review_by_order_id(order_id) is not None:
-        await call.answer("Відгук уже залишено.", show_alert=True)
-        return
-
-    await state.update_data(
-        review_order_id=order_id,
-        review_stars=stars,
-        review_message_chat_id=call.message.chat.id,
-        review_message_id=call.message.message_id,
-    )
-
-    if stars >= 4:
-        created = await create_review(
-            order_id=order_id,
-            telegram_id=user.id,
-            stars=stars,
-            reason="Позитивний відгук",
-        )
-
-        if not created:
-            await call.answer("Відгук уже існує.", show_alert=True)
-            return
-
-        await state.clear()
-
-        try:
-            await bot.send_message(
-                REVIEWS_CHAT_ID,
-                build_review_chat_message(order, user, stars, "Позитивний відгук"),
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
-        except Exception:
-            logging.exception("Failed to send review")
-
-        await call.answer()
-
-        try:
-            await call.message.edit_text(
-                "🧡 Дякуємо за високу оцінку!\n\n"
-                "Ваш відгук допомагає нам ставати кращими.",
-                parse_mode="HTML",
-            )
-
-            await asyncio.sleep(5)
-
-            try:
-                await call.message.delete()
-            except Exception:
-                pass
-
-        except Exception:
-            pass
-
-        return
-
-    await state.set_state(ReviewForm.rating)
-    await call.answer()
-
-    try:
-        await call.message.edit_text(
-            f"⭐ Ваша оцінка: {'⭐' * stars}\n\n"
-            "Будь ласка, підкажіть причину:",
-            reply_markup=get_review_reasons_keyboard(order_id, stars),
-            parse_mode="HTML",
-        )
-    except Exception:
-        await call.message.answer(
-            f"⭐ Ваша оцінка: {'⭐' * stars}\n\n"
-            "Будь ласка, підкажіть причину:",
-            reply_markup=get_review_reasons_keyboard(order_id, stars),
-            parse_mode="HTML",
-        )
-
-
-@router.callback_query(lambda c: c.data.startswith("review_reason:"))
-async def review_reason_callback(call: CallbackQuery, state: FSMContext):
-    if await deny_if_not_private_callback(call):
-        return
-    if await deny_if_banned_callback(call):
-        return
-
-    user = call.from_user
-    if user is None:
-        await call.answer("Не вдалося визначити користувача.", show_alert=True)
-        return
-
-    parts = call.data.split(":")
-    if len(parts) != 4:
-        await call.answer("Помилка даних.", show_alert=True)
-        return
-
-    try:
-        order_id = int(parts[1])
-        stars = int(parts[2])
-    except ValueError:
-        await call.answer("Помилка даних.", show_alert=True)
-        return
-
-    reason_code = parts[3]
-    reason_map = {
-        "expensive": "Дорого",
-        "slow": "Довго",
-        "car_state": "Стан авто",
-        "driver": "Водій",
-        "other": "Інше",
-    }
-
-    reason = reason_map.get(reason_code)
-    if reason is None:
-        await call.answer("Помилка даних.", show_alert=True)
-        return
-
-    order = await get_order_by_id_for_user(order_id, user.id)
-    if order is None:
-        await call.answer("Замовлення не знайдено.", show_alert=True)
-        return
-
-    if await get_review_by_order_id(order_id) is not None:
-        await call.answer("Відгук уже залишено.", show_alert=True)
-        return
-
-    if reason == "Інше":
-        await state.set_state(ReviewForm.custom_reason)
-
-        try:
-            await call.message.edit_text(
-                "✍️ Введіть причину відгуку текстом:",
-                parse_mode="HTML",
-            )
-        except Exception:
-            await call.message.answer(
-                "✍️ Введіть причину відгуку текстом:",
-                parse_mode="HTML",
-            )
-
-        return
-
-    created = await create_review(order_id=order_id, telegram_id=user.id, stars=stars, reason=reason)
-
-    if not created:
-        await call.answer("Відгук уже існує.", show_alert=True)
-        await state.clear()
-        return
-
-    await state.clear()
-
-    try:
-        await bot.send_message(
-            REVIEWS_CHAT_ID,
-            build_review_chat_message(order, user, stars, reason),
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
-    except Exception:
-        logging.exception("Failed to send review")
-
-    await call.answer()
-
-    try:
-        await call.message.edit_text(
-            "✅ Дякуємо за вашу думку!\n"
-            "Ми дуже цінуємо ваш відгук.",
-            parse_mode="HTML",
-        )
-
-        await asyncio.sleep(5)
-
-        try:
-            await call.message.delete()
-        except Exception:
-            pass
-
-    except Exception:
-        pass
-
-
-@router.message(ReviewForm.custom_reason)
-async def process_custom_review_reason(message: Message, state: FSMContext):
-    if await deny_if_not_private_message(message):
-        return
-    if await deny_if_banned_message(message):
-        return
-
-    user = message.from_user
-    if user is None:
-        await message.answer("Не вдалося визначити користувача.")
-        return
-
-    text = (message.text or "").strip()
-    if len(text) < 2:
-        await message.answer("Будь ласка, введіть причину більш детально.")
-        return
-
-    data = await state.get_data()
-    order_id = data.get("review_order_id")
-    stars = data.get("review_stars")
-    review_message_chat_id = data.get("review_message_chat_id")
-    review_message_id = data.get("review_message_id")
-
-    if not isinstance(order_id, int) or not isinstance(stars, int):
-        await state.clear()
-        await message.answer("Сталася помилка. Спробуйте залишити відгук ще раз.")
-        return
-
-    order = await get_order_by_id_for_user(order_id, user.id)
-    if order is None:
-        await state.clear()
-        await message.answer("Замовлення не знайдено.")
-        return
-
-    if await get_review_by_order_id(order_id) is not None:
-        await state.clear()
-        await message.answer("Відгук для цього замовлення вже залишено.")
-        return
-
-    created = await create_review(order_id=order_id, telegram_id=user.id, stars=stars, reason=text)
-    if not created:
-        await state.clear()
-        await message.answer("Відгук для цього замовлення вже існує.")
-        return
-
-    await state.clear()
-
-    try:
-        await bot.send_message(
-            REVIEWS_CHAT_ID,
-            build_review_chat_message(order, user, stars, text),
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
-    except Exception:
-        logging.exception("Failed to send custom review to REVIEWS_CHAT_ID")
-
-    try:
-        await message.delete()
-    except Exception:
-        pass
-
-    if isinstance(review_message_chat_id, int) and isinstance(review_message_id, int):
-        try:
-            await bot.edit_message_text(
-                chat_id=review_message_chat_id,
-                message_id=review_message_id,
-                text="✅ Дякуємо за вашу думку!\n"
-                     "Ми дуже цінуємо ваш відгук.",
-                parse_mode="HTML",
-            )
-            return
-        except Exception:
-            pass
-
-    await message.answer(
-        "✅ Дякуємо за вашу думку!\n"
-        "Ми дуже цінуємо ваш відгук.",
-        reply_markup=ReplyKeyboardRemove(),
     )
 
 # =========================
