@@ -31,7 +31,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 # =========================
 # CONFIG
 # =========================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "7097415485:AAGHoSQLUEEJVVGppUnj0nNdME2bLo6lymU")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "7394588586:AAF6pqDYoCg7ZkesVT1YbAfiQ_3Cc9ZonTU")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "-4962711861"))
 REVIEWS_CHAT_ID = int(os.getenv("REVIEWS_CHAT_ID", "-5169948092"))
 SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "+380632354243")
