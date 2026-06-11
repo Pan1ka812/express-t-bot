@@ -3447,7 +3447,13 @@ if __name__ == "__main__":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
     async def main():
-        await bot.delete_webhook(drop_pending_updates=False)
+        await bot.delete_webhook(drop_pending_updates=True)
+        await bot.set_my_commands([
+            types.BotCommand(command="start", description="Головне меню"),
+            types.BotCommand(command="order", description="Нове замовлення"),
+            types.BotCommand(command="profile", description="Мій профіль"),
+            types.BotCommand(command="help", description="Допомога"),
+        ])
         print("Бот запущено...")
         await dp.start_polling(bot)
 
