@@ -1549,13 +1549,16 @@ async def cmd_start(message: Message, state: FSMContext):
         "🚀 Щоб зробити замовлення, натисніть /order"
     )
 
-    if photo_path.exists():
-        await message.answer_photo(
-            FSInputFile(str(photo_path)),
-            caption=caption_text,
-            parse_mode="HTML",
-        )
-    else:
+    try:
+        if photo_path.exists():
+            await message.answer_photo(
+                FSInputFile(str(photo_path)),
+                caption=caption_text,
+                parse_mode="HTML",
+            )
+        else:
+            await message.answer(caption_text, parse_mode="HTML")
+    except Exception:
         await message.answer(caption_text, parse_mode="HTML")
 
 
