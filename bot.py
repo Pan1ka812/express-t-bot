@@ -1415,6 +1415,18 @@ async def unban_user_command(message: Message):
     await message.answer(f"✅ Користувача {user_id} розблоковано.")
 
 
+@router.message(Command("clearall"))
+async def clearall_command(message: Message):
+    if not is_admin_chat_message(message):
+        return
+    async with _db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM orders")
+        await conn.execute("DELETE FROM users")
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _setup_sheets_sync)
+    await message.answer("✅ Всі замовлення та користувачі видалені. Таблиця очищена.")
+
+
 @router.message(Command("banlist"))
 async def banlist_command(message: Message):
     if not is_admin_chat_message(message):
