@@ -1152,73 +1152,36 @@ def build_admin_summary(user: types.User, data: dict, order_id: int, profile: Op
     if data.get("cargo_name") == "Інше" and data.get("custom_cargo_description"):
         cargo_label = f"Інше ({safe_text(data.get('custom_cargo_description'))})"
 
-    client_tag = profile["client_tag"] if profile else "Новий клієнт"
-    orders_count = profile["orders_count"] if profile else 0
-    note = profile["note"] if profile else ""
+    client_phone = data.get("client_phone") or ""
+    loading_phone = data.get("loading_phone") or ""
+    unloading_phone = data.get("unloading_phone") or ""
+
+    phones_line = f"<b>📞 Тел.:</b> {safe_text(client_phone)}"
+    if loading_phone and loading_phone != client_phone:
+        phones_line += f"  |  <b>Завантаження:</b> {safe_text(loading_phone)}"
+    if unloading_phone and unloading_phone != client_phone and unloading_phone != loading_phone:
+        phones_line += f"  |  <b>Розвантаження:</b> {safe_text(unloading_phone)}"
 
     lines = [
         f"<b>🚨 НОВА ЗАЯВКА #{order_id}</b>",
         "",
         f"<b>👤 Клієнт:</b> {safe_text(data.get('customer_name') or user.full_name, 'Не вказано')}",
-        f"<b>🆔 ID:</b> {user.id}",
-        f"<b>📱 Username:</b> @{html.escape(user.username) if user.username else 'немає'}",
-        f"<b>🔗 Посилання:</b> <a href='tg://user?id={user.id}'>Написати клієнту</a>",
-        f"<b>⭐ Статус клієнта:</b> {safe_text(client_tag)}",
-        f"<b>📦 Замовлень через бота:</b> {orders_count}",
-        "",
-        f"<b>🚛 Тип послуги:</b> {safe_text(data.get('service_type'))}",
+        phones_line,
         f"<b>📦 Вантаж:</b> {cargo_label}",
     ]
 
-    if note:
-        lines.insert(8, f"<b>📝 Внутрішня примітка:</b> {safe_text(note)}")
-
     if data.get("car_brand_model"):
-        lines.append(f"<b>🚗 Марка/модель авто:</b> {safe_text(data.get('car_brand_model'))}")
-
-    if data.get("dimensions"):
-        lines.append(f"<b>📏 Габарити:</b> {safe_text(data.get('dimensions'))}")
-
-    if data.get("weight"):
-        lines.append(f"<b>⚖️ Вага:</b> {safe_text(data.get('weight'))}")
-
-    lines.append(f"<b>⏰ Терміновість:</b> {safe_text(data.get('urgency_type'))}")
-
-    if data.get("urgency_type") == "На інший день":
-        lines.append(f"<b>📅 Дата:</b> {safe_text(data.get('scheduled_date'))}")
-        lines.append(f"<b>🕐 Час:</b> {safe_text(data.get('scheduled_time'))}")
+        lines.append(f"<b>🚗 Марка/модель:</b> {safe_text(data.get('car_brand_model'))}")
 
     lines.extend([
-        f"<b>📍 Адреса завантаження:</b> {safe_text(data.get('loading_address'))}",
-        f"<b>📍 Адреса розвантаження:</b> {safe_text(data.get('unloading_address'))}",
-        f"<b>📞 Тел. замовника:</b> {safe_text(data.get('client_phone'))}",
-        f"<b>📞 Тел. завантаження:</b> {safe_text(data.get('loading_phone'))}",
-        f"<b>📞 Тел. розвантаження:</b> {safe_text(data.get('unloading_phone'))}",
+        f"<b>📍 Завантаження:</b> {safe_text(data.get('loading_address'))}",
+        f"<b>📍 Розвантаження:</b> {safe_text(data.get('unloading_address'))}",
     ])
 
     payer_line = f"<b>💰 Платник:</b> {safe_text(data.get('payer_type'))}"
     if data.get("payer_type") == "БН" and data.get("payer_details"):
-        payer_line += f" - {safe_text(data.get('payer_details'))}"
+        payer_line += f" — {safe_text(data.get('payer_details'))}"
     lines.append(payer_line)
-
-    if data.get("support_required") == "потрібен":
-        lines.append("<b>🚨 Супровід:</b> потрібен")
-
-    if data.get("comment"):
-        lines.append(f"<b>📝 Коментар:</b> {safe_text(data.get('comment'))}")
-
-    loading_lat = data.get("loading_lat")
-    loading_lng = data.get("loading_lng")
-    unloading_lat = data.get("unloading_lat")
-    unloading_lng = data.get("unloading_lng")
-
-    if loading_lat and loading_lng and unloading_lat and unloading_lng:
-        route_url = (
-            f"https://www.openstreetmap.org/directions"
-            f"?from={loading_lat},{loading_lng}&to={unloading_lat},{unloading_lng}"
-        )
-        lines.append("")
-        lines.append(f"🗺️ <a href='{route_url}'>Маршрут на OpenStreetMap</a>")
 
     return "\n".join(lines)
 
