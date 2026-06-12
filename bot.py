@@ -1156,21 +1156,13 @@ def build_admin_summary(user: types.User, data: dict, order_id: int, profile: Op
     orders_count = profile["orders_count"] if profile else 0
     note = profile["note"] if profile else ""
 
-    client_phone = data.get("client_phone") or ""
-    loading_phone = data.get("loading_phone") or ""
-    unloading_phone = data.get("unloading_phone") or ""
-
-    phones_line = f"<b>📞 Тел. замовника:</b> {safe_text(client_phone)}"
-    if loading_phone and loading_phone != client_phone:
-        phones_line += f"  |  <b>Завантаження:</b> {safe_text(loading_phone)}"
-    if unloading_phone and unloading_phone != client_phone and unloading_phone != loading_phone:
-        phones_line += f"  |  <b>Розвантаження:</b> {safe_text(unloading_phone)}"
-
     lines = [
         f"<b>🚨 НОВА ЗАЯВКА #{order_id}</b>",
         "",
         f"<b>👤 Клієнт:</b> {safe_text(data.get('customer_name') or user.full_name, 'Не вказано')}",
-        phones_line,
+        f"<b>📞 Тел. замовника:</b> {safe_text(data.get('client_phone'))}",
+        f"<b>📞 Тел. завантаження:</b> {safe_text(data.get('loading_phone'))}",
+        f"<b>📞 Тел. розвантаження:</b> {safe_text(data.get('unloading_phone'))}",
         f"<b>📦 Вантаж:</b> {cargo_label}",
     ]
 
