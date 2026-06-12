@@ -82,11 +82,6 @@ PAYER_TYPES = [
     "БН",
 ]
 
-PRICE_CONFIRMATION_TYPES = [
-    "Погоджуюсь",
-    "Відмовляюсь",
-]
-
 LOADING_PHONE_OPTIONS = [
     "Цей самий номер",
     "Інший номер",
@@ -110,9 +105,10 @@ ADDRESS_HINT_WORDS = {
 
 
 ORDER_STATUS_CREATED = "Створено"
-ORDER_STATUS_PRICE_SENT = "Ціну надіслано"
-ORDER_STATUS_AGREED = "Клієнт погодився"
-ORDER_STATUS_DECLINED = "Клієнт відмовився"
+ORDER_STATUS_ACCEPTED = "Прийнято в роботу"
+ORDER_STATUS_REJECTED = "Не прийнято"
+
+DECLINE_REASONS = ["Відмова клієнта", "Вже неактуально", "Довго чекати"]
 
 MANUAL_PHONE_INPUT_TEXT = "✍️ Ввести інший номер вручну"
 PAGE_SIZE = 5
@@ -211,6 +207,9 @@ async def init_db():
         """)
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_reviews_telegram_id ON reviews(telegram_id)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_telegram_id ON orders(telegram_id)")
+        await conn.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS dispatcher_username TEXT")
+        await conn.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS responded_at TEXT")
+        await conn.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS decline_reason TEXT")
 
 
 async def upsert_user(
@@ -350,13 +349,25 @@ async def update_order_status_and_price(order_id: int, status: Optional[str] = N
     asyncio.create_task(update_order_in_sheets(order_id, status=status, price=price))
 
 
-async def get_pending_price_order(telegram_id: int) -> Optional[dict]:
+async def update_order_dispatcher(
+    order_id: int,
+    status: str,
+    dispatcher_username: str,
+    responded_at: str,
+    decline_reason: Optional[str] = None,
+):
     async with _db_pool.acquire() as conn:
-        row = await conn.fetchrow("""
-        SELECT id,telegram_id,customer_name,service_type,status
-        FROM orders WHERE telegram_id=$1 AND status=$2 ORDER BY id DESC LIMIT 1
-        """, telegram_id, ORDER_STATUS_PRICE_SENT)
-    return dict(row) if row else None
+        await conn.execute(
+            "UPDATE orders SET status=$1, dispatcher_username=$2, responded_at=$3, decline_reason=$4 WHERE id=$5",
+            status, dispatcher_username, responded_at, decline_reason, order_id,
+        )
+    asyncio.create_task(update_order_in_sheets(
+        order_id,
+        status=status,
+        dispatcher_username=dispatcher_username,
+        responded_at=responded_at,
+        decline_reason=decline_reason,
+    ))
 
 
 async def set_user_tag(telegram_id: int, client_tag: str):
@@ -384,6 +395,7 @@ SHEETS_HEADERS = [
     "Тел. завантаження", "Тел. розвантаження",
     "Платник", "Деталі платника", "Коментар",
     "Статус", "Ціна", "Telegram ID", "Username",
+    "Час відправки в групу", "Диспетчер", "Час відповіді диспетчера", "Причина відмови",
 ]
 
 _sheets_client: Optional[gspread.Client] = None
@@ -444,9 +456,10 @@ def _write_order_to_sheets_sync(order_id: int, user: types.User, data: dict, pro
         cargo_label = data.get("cargo_name") or ""
         if data.get("cargo_name") == "Інше" and data.get("custom_cargo_description"):
             cargo_label = f"Інше ({data.get('custom_cargo_description')})"
+        now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
         sheet.append_row([
             order_id,
-            datetime.now().strftime("%d.%m.%Y %H:%M"),
+            now_str,
             data.get("customer_name") or user.full_name or "",
             data.get("client_phone") or "",
             data.get("service_type") or "",
@@ -468,12 +481,23 @@ def _write_order_to_sheets_sync(order_id: int, user: types.User, data: dict, pro
             "",
             user.id,
             f"@{user.username}" if user.username else "",
+            now_str,  # Час відправки в групу
+            "",       # Диспетчер
+            "",       # Час відповіді диспетчера
+            "",       # Причина відмови
         ])
     except Exception:
         logging.exception("Failed to write order to Google Sheets")
 
 
-def _update_order_in_sheets_sync(order_id: int, status: Optional[str] = None, price: Optional[str] = None):
+def _update_order_in_sheets_sync(
+    order_id: int,
+    status: Optional[str] = None,
+    price: Optional[str] = None,
+    dispatcher_username: Optional[str] = None,
+    responded_at: Optional[str] = None,
+    decline_reason: Optional[str] = None,
+):
     client = _get_sheets_client()
     if client is None:
         return
@@ -488,6 +512,12 @@ def _update_order_in_sheets_sync(order_id: int, status: Optional[str] = None, pr
             sheet.update_cell(row, SHEETS_HEADERS.index("Статус") + 1, status)
         if price is not None:
             sheet.update_cell(row, SHEETS_HEADERS.index("Ціна") + 1, price)
+        if dispatcher_username is not None:
+            sheet.update_cell(row, SHEETS_HEADERS.index("Диспетчер") + 1, dispatcher_username)
+        if responded_at is not None:
+            sheet.update_cell(row, SHEETS_HEADERS.index("Час відповіді диспетчера") + 1, responded_at)
+        if decline_reason is not None:
+            sheet.update_cell(row, SHEETS_HEADERS.index("Причина відмови") + 1, decline_reason)
     except Exception:
         logging.exception("Failed to update order in Google Sheets")
 
@@ -497,9 +527,19 @@ async def write_order_to_sheets(order_id: int, user: types.User, data: dict, pro
     await loop.run_in_executor(None, _write_order_to_sheets_sync, order_id, user, data, profile)
 
 
-async def update_order_in_sheets(order_id: int, status: Optional[str] = None, price: Optional[str] = None):
+async def update_order_in_sheets(
+    order_id: int,
+    status: Optional[str] = None,
+    price: Optional[str] = None,
+    dispatcher_username: Optional[str] = None,
+    responded_at: Optional[str] = None,
+    decline_reason: Optional[str] = None,
+):
     loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, _update_order_in_sheets_sync, order_id, status, price)
+    await loop.run_in_executor(
+        None,
+        lambda: _update_order_in_sheets_sync(order_id, status, price, dispatcher_username, responded_at, decline_reason),
+    )
 
 # =========================
 # BAN STORAGE
@@ -2453,14 +2493,14 @@ async def _show_orders_page(call: CallbackQuery, offset: int):
         route = f"📍 {loading} → {unloading}" if (loading != "-" or unloading != "-") else "📍 не вказано"
 
         status = order.get("status")
-        if status == ORDER_STATUS_AGREED:
-            status_text = "✅ Погоджено"
-        elif status == ORDER_STATUS_DECLINED:
-            status_text = "❌ Відмовлено"
-        elif status == ORDER_STATUS_PRICE_SENT:
-            status_text = "💰 Ціну надіслано"
-        else:
+        if status == ORDER_STATUS_ACCEPTED:
+            status_text = "✅ Прийнято в роботу"
+        elif status == ORDER_STATUS_REJECTED:
+            status_text = "❌ Не прийнято"
+        elif status == ORDER_STATUS_CREATED:
             status_text = "🆕 Нове"
+        else:
+            status_text = f"🔄 {status}" if status else "🆕 Нове"
 
         line = (
             f"<b>{idx}.</b> 🚚 <b>#{order['id']}</b> — {service}\n"
@@ -2706,11 +2746,23 @@ async def process_confirmation(message: Message, state: FSMContext):
 
         asyncio.create_task(write_order_to_sheets(order_id, user, data, profile))
 
+        disp_kb = InlineKeyboardBuilder()
+        disp_kb.add(InlineKeyboardButton(
+            text="✅ Прийнято в роботу",
+            callback_data=f"disp_accept:{order_id}:{user.id}",
+        ))
+        disp_kb.add(InlineKeyboardButton(
+            text="❌ Не прийнято",
+            callback_data=f"disp_reject:{order_id}:{user.id}",
+        ))
+        disp_kb.adjust(2)
+
         await bot.send_message(
             ADMIN_CHAT_ID,
             admin_text,
             parse_mode="HTML",
             disable_web_page_preview=True,
+            reply_markup=disp_kb.as_markup(),
         )
 
         await message.answer(
@@ -2735,106 +2787,119 @@ async def process_confirmation(message: Message, state: FSMContext):
     await message.answer("Будь ласка, використовуйте кнопки для підтвердження.")
 
 # =========================
-# PRICE FLOW
+# DISPATCHER FLOW
 # =========================
-@router.message(lambda message: message.text and message.text.startswith("/price"))
-async def set_price(message: Message):
-    if not is_admin_chat_message(message):
+@router.callback_query(lambda c: c.data and c.data.startswith("disp_accept:"))
+async def disp_accept_callback(call: CallbackQuery):
+    await call.answer()
+    parts = call.data.split(":")
+    if len(parts) != 3:
         return
+    order_id = int(parts[1])
+    client_id = int(parts[2])
 
-    text = message.text or ""
-    parts = text.split()
+    dispatcher = call.from_user
+    dispatcher_tag = f"@{dispatcher.username}" if dispatcher.username else dispatcher.full_name or str(dispatcher.id)
+    responded_at = datetime.now().strftime("%d.%m.%Y %H:%M")
 
-    if len(parts) < 3:
-        await message.answer("Формат: /price [ID_замовлення] [ціна]")
-        return
+    await update_order_dispatcher(order_id, ORDER_STATUS_ACCEPTED, dispatcher_tag, responded_at)
 
     try:
-        order_id = int(parts[1])
-        price = " ".join(parts[2:])
-    except ValueError:
-        await message.answer("Формат: /price [ID_замовлення] [ціна]")
-        return
+        await call.message.edit_text(
+            (call.message.text or call.message.caption or "") +
+            f"\n\n✅ <b>Прийнято в роботу.</b> {html.escape(dispatcher_tag)}",
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=None,
+        )
+    except Exception:
+        pass
 
-    order = await get_order_by_id(order_id)
-    if order is None:
-        await message.answer(f"❌ Замовлення #{order_id} не знайдено.")
-        return
-
-    client_id = order["telegram_id"]
-    await update_order_status_and_price(order_id, status=ORDER_STATUS_PRICE_SENT, price=price)
+    client_kb = InlineKeyboardBuilder()
+    client_kb.add(InlineKeyboardButton(text="🚀 Нове замовлення", callback_data="profile_new_order"))
+    client_kb.add(InlineKeyboardButton(text="👤 Мій профіль", callback_data="client_go_profile"))
+    client_kb.adjust(1)
 
     try:
         await bot.send_message(
             client_id,
-            f"💰 <b>Ціна по замовленню #{order_id}:</b> {html.escape(price)}\n\nПогоджуєтесь з ціною?",
-            reply_markup=build_reply_keyboard(PRICE_CONFIRMATION_TYPES),
+            "✅ <b>Ваше замовлення прийнято в роботу!</b>\n\n"
+            "Дякуємо, що скористалися нашим сервісом.\n"
+            "Менеджер зателефонує вам найближчим часом.\n\n"
+            "Бажаєте зробити нове замовлення?",
             parse_mode="HTML",
+            reply_markup=client_kb.as_markup(),
         )
-        await message.answer(f"✅ Ціну {price} відправлено клієнту (замовлення #{order_id})")
     except Exception:
-        await message.answer(
-            f"❌ Не вдалося надіслати повідомлення клієнту.\n"
-            "Можливо клієнт заблокував бота."
+        logging.warning("Could not notify client %s about accepted order %s", client_id, order_id)
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("disp_reject:"))
+async def disp_reject_callback(call: CallbackQuery):
+    await call.answer()
+    parts = call.data.split(":")
+    if len(parts) != 3:
+        return
+    order_id = parts[1]
+    client_id = parts[2]
+
+    reason_kb = InlineKeyboardBuilder()
+    for i, reason in enumerate(DECLINE_REASONS):
+        reason_kb.add(InlineKeyboardButton(
+            text=reason,
+            callback_data=f"disp_reason:{order_id}:{client_id}:{i}",
+        ))
+    reason_kb.adjust(1)
+
+    try:
+        await call.message.edit_reply_markup(reply_markup=reason_kb.as_markup())
+    except Exception:
+        pass
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("disp_reason:"))
+async def disp_reason_callback(call: CallbackQuery):
+    await call.answer()
+    parts = call.data.split(":")
+    if len(parts) != 4:
+        return
+    order_id = int(parts[1])
+    client_id = int(parts[2])
+    reason_idx = int(parts[3])
+
+    reason = DECLINE_REASONS[reason_idx] if 0 <= reason_idx < len(DECLINE_REASONS) else "Інше"
+
+    dispatcher = call.from_user
+    dispatcher_tag = f"@{dispatcher.username}" if dispatcher.username else dispatcher.full_name or str(dispatcher.id)
+    responded_at = datetime.now().strftime("%d.%m.%Y %H:%M")
+
+    await update_order_dispatcher(order_id, ORDER_STATUS_REJECTED, dispatcher_tag, responded_at, decline_reason=reason)
+
+    try:
+        await call.message.edit_text(
+            (call.message.text or call.message.caption or "") +
+            f"\n\n❌ <b>Не прийнято.</b> Причина: {html.escape(reason)}. {html.escape(dispatcher_tag)}",
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=None,
         )
+    except Exception:
+        pass
 
 
-@router.message(lambda message: message.text in PRICE_CONFIRMATION_TYPES)
-async def process_price_confirmation(message: Message):
-    if await deny_if_not_private_message(message):
+@router.callback_query(lambda c: c.data == "client_go_profile")
+async def client_go_profile_callback(call: CallbackQuery):
+    if await deny_if_not_private_callback(call):
         return
-    if await deny_if_banned_message(message):
-        return
-
-    user = message.from_user
+    await call.answer()
+    user = call.from_user
     if user is None:
         return
-
-    order = await get_pending_price_order(user.id)
-    if order is None:
+    profile = await get_user_profile(user.id)
+    if profile is None:
+        await call.message.answer("Профіль поки що порожній. Створіть перше замовлення через /order")
         return
-
-    order_id = order["id"]
-    text = message.text or ""
-
-    if text == "Погоджуюсь":
-        await update_order_status_and_price(order_id, status=ORDER_STATUS_AGREED)
-
-        await bot.send_message(
-            ADMIN_CHAT_ID,
-            f"✅ <b>Клієнт погодився!</b>\n\n"
-            f"📦 Замовлення: #{order_id}\n"
-            f"👤 Клієнт: {safe_text(user.full_name, 'Не вказано')}\n"
-            f"🆔 ID: {user.id}\n"
-            f"📱 Username: @{html.escape(user.username) if user.username else 'немає'}\n"
-            f"🔗 <a href='tg://user?id={user.id}'>Написати клієнту</a>",
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
-        await message.answer(
-            "✅ Дякуємо за погодження!\n\n🚚 Менеджер звʼяжеться, якщо це буде потрібно для уточнення деталей.",
-            reply_markup=ReplyKeyboardRemove(),
-        )
-        return
-
-    if text == "Відмовляюсь":
-        await update_order_status_and_price(order_id, status=ORDER_STATUS_DECLINED)
-
-        await bot.send_message(
-            ADMIN_CHAT_ID,
-            f"❌ <b>Клієнт відмовився!</b>\n\n"
-            f"📦 Замовлення: #{order_id}\n"
-            f"👤 Клієнт: {safe_text(user.full_name, 'Не вказано')}\n"
-            f"🆔 ID: {user.id}\n"
-            f"📱 Username: @{html.escape(user.username) if user.username else 'немає'}\n"
-            f"🔗 <a href='tg://user?id={user.id}'>Написати клієнту</a>",
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
-        await message.answer(
-            "❌ Заявку скасовано.\n\nЯкщо у вас є питання, зверніться до менеджера.",
-            reply_markup=ReplyKeyboardRemove(),
-        )
+    await replace_callback_message(call, build_profile_text(profile), reply_markup=get_profile_keyboard(), parse_mode="HTML")
 
 # =========================
 # MAIN
