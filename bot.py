@@ -347,6 +347,7 @@ async def update_order_status_and_price(order_id: int, status: Optional[str] = N
             await conn.execute("UPDATE orders SET status=$1 WHERE id=$2", status, order_id)
         elif price is not None:
             await conn.execute("UPDATE orders SET price=$1 WHERE id=$2", price, order_id)
+    asyncio.create_task(update_order_in_sheets(order_id, status=status, price=price))
 
 
 async def get_pending_price_order(telegram_id: int) -> Optional[dict]:
@@ -375,7 +376,18 @@ async def set_user_note(telegram_id: int, note: str):
 # =========================
 # GOOGLE SHEETS
 # =========================
+SHEETS_HEADERS = [
+    "№ Замовлення", "Дата", "Ім'я клієнта", "Тел. замовника",
+    "Тип послуги", "Вантаж / Авто", "Марка / Модель",
+    "Габарити", "Вага", "Терміновість", "Дата перевезення", "Час",
+    "Адреса завантаження", "Адреса розвантаження",
+    "Тел. завантаження", "Тел. розвантаження",
+    "Платник", "Деталі платника", "Коментар",
+    "Статус", "Ціна", "Telegram ID", "Username",
+]
+
 _sheets_client: Optional[gspread.Client] = None
+
 
 def _get_sheets_client() -> Optional[gspread.Client]:
     global _sheets_client
@@ -395,34 +407,50 @@ def _get_sheets_client() -> Optional[gspread.Client]:
     return _sheets_client
 
 
+def _setup_sheets_sync():
+    client = _get_sheets_client()
+    if client is None:
+        return
+    try:
+        sheet = client.open_by_key(GOOGLE_SPREADSHEET_ID).sheet1
+        try:
+            first_row = sheet.row_values(1)
+        except Exception:
+            first_row = []
+        if first_row != SHEETS_HEADERS:
+            sheet.clear()
+            sheet.append_row(SHEETS_HEADERS)
+            sheet.format("A1:W1", {
+                "textFormat": {"bold": True, "fontSize": 10},
+                "backgroundColor": {"red": 0.26, "green": 0.52, "blue": 0.96},
+                "horizontalAlignment": "CENTER",
+            })
+            sheet.freeze(rows=1)
+    except Exception:
+        logging.exception("Failed to setup Google Sheets")
+
+
+async def setup_sheets():
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _setup_sheets_sync)
+
+
 def _write_order_to_sheets_sync(order_id: int, user: types.User, data: dict, profile: Optional[dict]):
     client = _get_sheets_client()
     if client is None:
         return
     try:
         sheet = client.open_by_key(GOOGLE_SPREADSHEET_ID).sheet1
-        if sheet.row_count == 0 or not sheet.row_values(1):
-            sheet.append_row([
-                "ID", "Дата", "Telegram ID", "Username", "Ім'я", "Тел. замовника",
-                "Тип послуги", "Вантаж/Тип авто", "Опис вантажу", "Марка/модель",
-                "Габарити", "Вага", "Терміновість", "Дата перевезення", "Час",
-                "Адреса завантаження", "Адреса розвантаження",
-                "Тел. завантаження", "Тел. розвантаження",
-                "Платник", "Деталі платника", "Коментар", "Статус клієнта",
-            ])
         cargo_label = data.get("cargo_name") or ""
         if data.get("cargo_name") == "Інше" and data.get("custom_cargo_description"):
             cargo_label = f"Інше ({data.get('custom_cargo_description')})"
         sheet.append_row([
             order_id,
             datetime.now().strftime("%d.%m.%Y %H:%M"),
-            user.id,
-            f"@{user.username}" if user.username else "",
             data.get("customer_name") or user.full_name or "",
             data.get("client_phone") or "",
             data.get("service_type") or "",
             cargo_label,
-            data.get("custom_cargo_description") or "",
             data.get("car_brand_model") or "",
             data.get("dimensions") or "",
             data.get("weight") or "",
@@ -436,15 +464,42 @@ def _write_order_to_sheets_sync(order_id: int, user: types.User, data: dict, pro
             data.get("payer_type") or "",
             data.get("payer_details") or "",
             data.get("comment") or "",
-            profile.get("client_tag", "Новий клієнт") if profile else "Новий клієнт",
+            ORDER_STATUS_CREATED,
+            "",
+            user.id,
+            f"@{user.username}" if user.username else "",
         ])
     except Exception:
         logging.exception("Failed to write order to Google Sheets")
 
 
+def _update_order_in_sheets_sync(order_id: int, status: Optional[str] = None, price: Optional[str] = None):
+    client = _get_sheets_client()
+    if client is None:
+        return
+    try:
+        sheet = client.open_by_key(GOOGLE_SPREADSHEET_ID).sheet1
+        try:
+            cell = sheet.find(str(order_id), in_column=1)
+        except Exception:
+            return
+        row = cell.row
+        if status is not None:
+            sheet.update_cell(row, SHEETS_HEADERS.index("Статус") + 1, status)
+        if price is not None:
+            sheet.update_cell(row, SHEETS_HEADERS.index("Ціна") + 1, price)
+    except Exception:
+        logging.exception("Failed to update order in Google Sheets")
+
+
 async def write_order_to_sheets(order_id: int, user: types.User, data: dict, profile: Optional[dict]):
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, _write_order_to_sheets_sync, order_id, user, data, profile)
+
+
+async def update_order_in_sheets(order_id: int, status: Optional[str] = None, price: Optional[str] = None):
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _update_order_in_sheets_sync, order_id, status, price)
 
 # =========================
 # BAN STORAGE
@@ -2782,6 +2837,7 @@ if __name__ == "__main__":
 
     async def main():
         await init_db()
+        await setup_sheets()
         await bot.delete_webhook(drop_pending_updates=True)
         await bot.set_my_commands([
             types.BotCommand(command="start", description="Головне меню"),
