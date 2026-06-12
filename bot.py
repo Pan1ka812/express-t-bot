@@ -108,7 +108,7 @@ ORDER_STATUS_CREATED = "Створено"
 ORDER_STATUS_ACCEPTED = "Прийнято в роботу"
 ORDER_STATUS_REJECTED = "Не прийнято"
 
-DECLINE_REASONS = ["Відмова клієнта", "Вже неактуально", "Довго чекати"]
+DECLINE_REASONS = ["Відмова клієнта", "Вже неактуально", "Дорого"]
 
 MANUAL_PHONE_INPUT_TEXT = "✍️ Ввести інший номер вручну"
 PAGE_SIZE = 5
