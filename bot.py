@@ -1271,6 +1271,28 @@ async def finalize_client_phone(message: Message, state: FSMContext, phone: str)
     )
     await state.set_state(Form.service_type)
 
+BOT_COMMANDS = [
+    types.BotCommand(command="start", description="Головне меню"),
+    types.BotCommand(command="order", description="Нове замовлення"),
+    types.BotCommand(command="profile", description="Мій профіль"),
+    types.BotCommand(command="help", description="Допомога"),
+]
+
+
+async def hide_commands(user_id: int):
+    try:
+        await bot.set_my_commands([], scope=types.BotCommandScopeChat(chat_id=user_id))
+    except Exception:
+        pass
+
+
+async def restore_commands(user_id: int):
+    try:
+        await bot.set_my_commands(BOT_COMMANDS, scope=types.BotCommandScopeChat(chat_id=user_id))
+    except Exception:
+        pass
+
+
 # =========================
 # PROFILE RENDER
 # =========================
@@ -1296,6 +1318,27 @@ async def send_profile(message: Message, telegram_id: int):
             parse_mode="HTML",
             reply_markup=get_profile_keyboard(),
         )
+
+
+async def send_profile_to_chat(chat_id: int, telegram_id: int):
+    profile = await get_user_profile(telegram_id)
+    if profile is None:
+        await bot.send_message(chat_id, "Профіль поки що порожній. Створіть перше замовлення через /order")
+        return
+
+    text = build_profile_text(profile)
+    profile_banner = BASE_DIR / "profile_banner.jpg"
+
+    if profile_banner.exists():
+        await bot.send_photo(
+            chat_id,
+            FSInputFile(str(profile_banner)),
+            caption=text,
+            parse_mode="HTML",
+            reply_markup=get_profile_keyboard(),
+        )
+    else:
+        await bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=get_profile_keyboard())
 
 # =========================
 # COMMANDS
@@ -1398,6 +1441,7 @@ async def cmd_order(message: Message, state: FSMContext):
         return
 
     await state.clear()
+    await hide_commands(message.from_user.id)
     await message.answer(
         "Як до вас звертатися?\nНаприклад: Андрій",
         reply_markup=ReplyKeyboardRemove(),
@@ -1729,6 +1773,7 @@ async def process_oversize_support(message: Message, state: FSMContext):
         return
 
     if text == "Не супроводжуємо":
+        await restore_commands(message.from_user.id)
         await message.answer(
             "❌ На жаль, ми не можемо виконати перевезення без супроводу для негабаритного вантажу.\n\n"
             "Якщо бажаєте оформити нову заявку — натисніть /order",
@@ -2282,7 +2327,8 @@ async def process_payer_type(message: Message, state: FSMContext):
     if text == "БН":
         await state.update_data(payer_type="БН")
         await message.answer(
-            "Вкажіть, будь ласка, назву платника та код ЄДРПОУ (через кому):",
+            "Вкажіть назву платника та код ЄДРПОУ або ІНН через кому.\n"
+            "Приклад: ТОВ Компанія, 12345678",
             reply_markup=ReplyKeyboardRemove(),
         )
         await state.set_state(Form.payer_details)
@@ -2301,6 +2347,17 @@ async def process_payer_details(message: Message, state: FSMContext):
     text = (message.text or "").strip()
     if len(text) < 3:
         await message.answer("Будь ласка, введіть коректні дані платника.")
+        return
+
+    digit_sequences = re.findall(r"\d+", text)
+    valid_code = any(len(d) in (8, 11) for d in digit_sequences)
+    if not valid_code:
+        await message.answer(
+            "❌ Не знайдено коректний код ЄДРПОУ або ІНН.\n\n"
+            "• ЄДРПОУ — 8 цифр (для юридичних осіб)\n"
+            "• ІНН — 11 цифр (для фізичних осіб)\n\n"
+            "Спробуйте ще раз. Приклад: ТОВ Компанія, 12345678"
+        )
         return
 
     await state.update_data(payer_details=text)
@@ -2589,9 +2646,7 @@ async def history_nav_message(message: Message, state: FSMContext):
     if message.text == "👤 Профіль":
         await _delete_history_messages(message.chat.id, state)
         await state.clear()
-        profile = await get_user_profile(message.from_user.id)
-        text = build_profile_text(profile) if profile else "Профіль поки що порожній."
-        await message.answer(text, parse_mode="HTML", reply_markup=get_profile_keyboard())
+        await send_profile_to_chat(message.chat.id, message.from_user.id)
         return
 
     if message.text == "◀️":
@@ -2649,6 +2704,7 @@ async def repeat_order_callback(call: CallbackQuery, state: FSMContext):
     )
 
     await call.answer()
+    await hide_commands(call.from_user.id)
     await show_confirmation(call.message, state)
 
 
@@ -2661,6 +2717,7 @@ async def profile_new_order_callback(call: CallbackQuery, state: FSMContext):
 
     await call.answer()
     await state.clear()
+    await hide_commands(call.from_user.id)
     await call.message.answer(
         "Як до вас звертатися?\nНаприклад: Андрій",
         reply_markup=ReplyKeyboardRemove(),
@@ -2718,9 +2775,7 @@ async def history_back_to_profile_callback(call: CallbackQuery, state: FSMContex
     if user is None:
         return
 
-    profile = await get_user_profile(user.id)
-    text = build_profile_text(profile) if profile else "Профіль поки що порожній."
-    await bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=get_profile_keyboard())
+    await send_profile_to_chat(chat_id, user.id)
 
 # =========================
 # FINAL CONFIRMATION
@@ -2797,6 +2852,7 @@ async def process_confirmation(message: Message, state: FSMContext):
             reply_markup=disp_kb.as_markup(),
         )
 
+        await restore_commands(user.id)
         await message.answer(
             "🎉 <b>Дякуємо за ваше замовлення!</b>\n\n"
             "✅ Вашу заявку успішно прийнято.\n"
@@ -2809,6 +2865,7 @@ async def process_confirmation(message: Message, state: FSMContext):
         return
 
     if text == "❌ Скасувати":
+        await restore_commands(user.id)
         await message.answer(
             "❌ Заявку скасовано. Щоб створити нову заявку, натисніть /order",
             reply_markup=ReplyKeyboardRemove(),
@@ -2948,12 +3005,7 @@ if __name__ == "__main__":
         await init_db()
         await setup_sheets()
         await bot.delete_webhook(drop_pending_updates=True)
-        await bot.set_my_commands([
-            types.BotCommand(command="start", description="Головне меню"),
-            types.BotCommand(command="order", description="Нове замовлення"),
-            types.BotCommand(command="profile", description="Мій профіль"),
-            types.BotCommand(command="help", description="Допомога"),
-        ])
+        await bot.set_my_commands(BOT_COMMANDS)
         print("Бот запущено...")
         await dp.start_polling(bot)
 
