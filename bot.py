@@ -1035,6 +1035,13 @@ def build_reply_keyboard(options: list[str], adjust: int = 2):
     return kb.as_markup(resize_keyboard=True)
 
 
+def clean_map_address(address: str) -> str:
+    address = re.sub(r",?\s*Україна\s*", "", address, flags=re.IGNORECASE)
+    address = re.sub(r",?\s*\d{5}\s*", "", address)
+    address = re.sub(r"\s*,\s*,", ",", address)
+    return address.strip(", ").strip()
+
+
 def build_address_keyboard(mode: str):
     kb = ReplyKeyboardBuilder()
     kb.add(KeyboardButton(
@@ -1930,7 +1937,7 @@ async def process_loading_address(message: Message, state: FSMContext):
     if message.web_app_data is not None:
         try:
             payload = json.loads(message.web_app_data.data)
-            address = (payload.get("address") or "").strip()
+            address = clean_map_address(payload.get("address") or "")
             lat = payload.get("lat")
             lng = payload.get("lng")
         except Exception:
@@ -1989,7 +1996,7 @@ async def process_unloading_address(message: Message, state: FSMContext):
     if message.web_app_data is not None:
         try:
             payload = json.loads(message.web_app_data.data)
-            address = (payload.get("address") or "").strip()
+            address = clean_map_address(payload.get("address") or "")
             lat = payload.get("lat")
             lng = payload.get("lng")
         except Exception:
