@@ -142,6 +142,7 @@ class Form(StatesGroup):
     comment = State()
     oversize_support = State()
     confirmation = State()
+    history_browse = State()
 
 
 # =========================
@@ -2473,27 +2474,33 @@ async def _delete_history_messages(chat_id: int, state: FSMContext):
     await state.update_data(history_msg_ids=[])
 
 
-async def _show_orders_page(call: CallbackQuery, state: FSMContext, offset: int):
-    user = call.from_user
-    if user is None:
-        return
+def _build_history_nav_keyboard(offset: int, total: int) -> types.ReplyKeyboardMarkup:
+    kb = ReplyKeyboardBuilder()
+    if offset > 0:
+        kb.add(KeyboardButton(text="◀️ Назад"))
+    if offset + PAGE_SIZE < total:
+        kb.add(KeyboardButton(text="▶️ Вперед"))
+    kb.add(KeyboardButton(text="👤 Профіль"))
+    kb.adjust(2 if (offset > 0 and offset + PAGE_SIZE < total) else 1)
+    return kb.as_markup(resize_keyboard=True)
 
-    chat_id = call.message.chat.id
 
+async def _render_orders_page(chat_id: int, user_id: int, state: FSMContext, offset: int):
     await _delete_history_messages(chat_id, state)
-    try:
-        await call.message.delete()
-    except Exception:
-        pass
 
-    total = await count_user_orders(user.id)
+    total = await count_user_orders(user_id)
 
     if total == 0:
-        msg = await bot.send_message(chat_id, "📦 У вас поки що немає заявок через бота.", reply_markup=get_profile_keyboard())
+        msg = await bot.send_message(
+            chat_id,
+            "📦 У вас поки що немає заявок через бота.",
+            reply_markup=get_profile_keyboard(),
+        )
         await state.update_data(history_msg_ids=[msg.message_id])
+        await state.clear()
         return
 
-    orders = await get_orders_page(user.id, offset=offset, limit=PAGE_SIZE)
+    orders = await get_orders_page(user_id, offset=offset, limit=PAGE_SIZE)
     page_num = offset // PAGE_SIZE + 1
     total_pages = (total + PAGE_SIZE - 1) // PAGE_SIZE
 
@@ -2532,28 +2539,27 @@ async def _show_orders_page(call: CallbackQuery, state: FSMContext, offset: int)
         msg = await bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=repeat_kb.as_markup())
         sent_ids.append(msg.message_id)
 
-    nav_kb = InlineKeyboardBuilder()
-    nav_btns = []
-    if offset > 0:
-        nav_btns.append(InlineKeyboardButton(text="◀️", callback_data=f"orders_page:{offset - PAGE_SIZE}"))
-    if offset + PAGE_SIZE < total:
-        nav_btns.append(InlineKeyboardButton(text="▶️", callback_data=f"orders_page:{offset + PAGE_SIZE}"))
-    for btn in nav_btns:
-        nav_kb.add(btn)
-    nav_kb.add(InlineKeyboardButton(text="⬅️ Назад до профілю", callback_data="history_back_to_profile"))
-    if nav_btns:
-        nav_kb.adjust(len(nav_btns), 1)
-    else:
-        nav_kb.adjust(1)
-
     nav_msg = await bot.send_message(
         chat_id,
         f"📄 Стор. {page_num}/{total_pages}",
-        reply_markup=nav_kb.as_markup(),
+        reply_markup=_build_history_nav_keyboard(offset, total),
     )
     sent_ids.append(nav_msg.message_id)
 
-    await state.update_data(history_msg_ids=sent_ids)
+    await state.update_data(history_msg_ids=sent_ids, history_offset=offset, history_total=total)
+    await state.set_state(Form.history_browse)
+
+
+async def _show_orders_page(call: CallbackQuery, state: FSMContext, offset: int):
+    chat_id = call.message.chat.id
+    user = call.from_user
+    if user is None:
+        return
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+    await _render_orders_page(chat_id, user.id, state, offset)
 
 
 @router.callback_query(lambda c: c.data == "profile_orders")
@@ -2566,18 +2572,29 @@ async def profile_orders_callback(call: CallbackQuery, state: FSMContext):
     await _show_orders_page(call, state, offset=0)
 
 
-@router.callback_query(lambda c: c.data.startswith("orders_page:"))
-async def orders_page_callback(call: CallbackQuery, state: FSMContext):
-    if await deny_if_not_private_callback(call):
+@router.message(Form.history_browse, lambda m: m.text in ("◀️ Назад", "▶️ Вперед", "👤 Профіль"))
+async def history_nav_message(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
         return
-    if await deny_if_banned_callback(call):
+
+    data = await state.get_data()
+    offset = data.get("history_offset", 0)
+    total = data.get("history_total", 0)
+
+    if message.text == "👤 Профіль":
+        await _delete_history_messages(message.chat.id, state)
+        await state.clear()
+        profile = await get_user_profile(message.from_user.id)
+        text = build_profile_text(profile) if profile else "Профіль поки що порожній."
+        await message.answer(text, parse_mode="HTML", reply_markup=get_profile_keyboard())
         return
-    await call.answer()
-    try:
-        offset = int(call.data.split(":")[1])
-    except (IndexError, ValueError):
-        return
-    await _show_orders_page(call, state, offset=max(0, offset))
+
+    if message.text == "◀️ Назад":
+        new_offset = max(0, offset - PAGE_SIZE)
+    else:
+        new_offset = offset + PAGE_SIZE
+
+    await _render_orders_page(message.chat.id, message.from_user.id, state, new_offset)
 
 
 @router.callback_query(lambda c: c.data.startswith("repeat_order:"))
@@ -2684,9 +2701,9 @@ async def history_back_to_profile_callback(call: CallbackQuery, state: FSMContex
         return
 
     await call.answer()
-
     chat_id = call.message.chat.id
     await _delete_history_messages(chat_id, state)
+    await state.clear()
     try:
         await call.message.delete()
     except Exception:
