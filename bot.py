@@ -2477,9 +2477,9 @@ async def _delete_history_messages(chat_id: int, state: FSMContext):
 def _build_history_nav_keyboard(offset: int, total: int) -> types.ReplyKeyboardMarkup:
     kb = ReplyKeyboardBuilder()
     if offset > 0:
-        kb.add(KeyboardButton(text="◀️ Назад"))
+        kb.add(KeyboardButton(text="◀️"))
     if offset + PAGE_SIZE < total:
-        kb.add(KeyboardButton(text="▶️ Вперед"))
+        kb.add(KeyboardButton(text="▶️"))
     kb.add(KeyboardButton(text="👤 Профіль"))
     kb.adjust(2 if (offset > 0 and offset + PAGE_SIZE < total) else 1)
     return kb.as_markup(resize_keyboard=True)
@@ -2572,10 +2572,15 @@ async def profile_orders_callback(call: CallbackQuery, state: FSMContext):
     await _show_orders_page(call, state, offset=0)
 
 
-@router.message(Form.history_browse, lambda m: m.text in ("◀️ Назад", "▶️ Вперед", "👤 Профіль"))
+@router.message(Form.history_browse, lambda m: m.text in ("◀️", "▶️", "👤 Профіль"))
 async def history_nav_message(message: Message, state: FSMContext):
     if await deny_if_not_private_message(message):
         return
+
+    try:
+        await message.delete()
+    except Exception:
+        pass
 
     data = await state.get_data()
     offset = data.get("history_offset", 0)
@@ -2589,7 +2594,7 @@ async def history_nav_message(message: Message, state: FSMContext):
         await message.answer(text, parse_mode="HTML", reply_markup=get_profile_keyboard())
         return
 
-    if message.text == "◀️ Назад":
+    if message.text == "◀️":
         new_offset = max(0, offset - PAGE_SIZE)
     else:
         new_offset = offset + PAGE_SIZE
