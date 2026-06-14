@@ -2487,7 +2487,7 @@ async def _show_orders_page(call: CallbackQuery, offset: int):
     lines = [f"<b>📚 Замовлення (стор. {page_num}/{total_pages}):</b>", ""]
 
     kb = InlineKeyboardBuilder()
-    repeat_btns = []
+    adjust = []
 
     for idx, order in enumerate(orders, start=offset + 1):
         service = safe_text(order.get("service_type"), "не вказано")
@@ -2513,16 +2513,16 @@ async def _show_orders_page(call: CallbackQuery, offset: int):
         if order.get("price"):
             line += f"\n💰 {safe_text(order.get('price'))}"
         lines.append(line)
-        lines.append("──────────")
         lines.append("")
 
-        repeat_btns.append(InlineKeyboardButton(
+        kb.add(InlineKeyboardButton(
             text=f"🔄 Повторити #{order['id']}",
             callback_data=f"repeat_order:{order['id']}",
         ))
+        adjust.append(1)
 
-    for btn in repeat_btns:
-        kb.add(btn)
+        lines.append("──────────")
+        lines.append("")
 
     nav_btns = []
     if offset > 0:
@@ -2531,13 +2531,12 @@ async def _show_orders_page(call: CallbackQuery, offset: int):
         nav_btns.append(InlineKeyboardButton(text="▶️", callback_data=f"orders_page:{offset + PAGE_SIZE}"))
     for btn in nav_btns:
         kb.add(btn)
-
-    kb.add(InlineKeyboardButton(text="⬅️ Назад до профілю", callback_data="history_back_to_profile"))
-
-    adjust = [1] * len(repeat_btns)
     if nav_btns:
         adjust.append(len(nav_btns))
+
+    kb.add(InlineKeyboardButton(text="⬅️ Назад до профілю", callback_data="history_back_to_profile"))
     adjust.append(1)
+
     kb.adjust(*adjust)
 
     await replace_callback_message(call, "\n".join(lines), reply_markup=kb.as_markup(), parse_mode="HTML")
