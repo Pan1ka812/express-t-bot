@@ -353,9 +353,9 @@ async def update_order_status_and_price(order_id: int, status: Optional[str] = N
 
 def format_response_time(sent_str: str, responded_str: str) -> str:
     try:
-        fmt = "%Y-%m-%d %H:%M:%S"
-        sent = datetime.strptime(sent_str, fmt)
-        responded = datetime.strptime(responded_str, fmt)
+        fmt = "%d.%m.%Y %H:%M"
+        sent = datetime.strptime(sent_str.strip(), fmt)
+        responded = datetime.strptime(responded_str.strip(), fmt)
         diff = int((responded - sent).total_seconds())
         if diff < 0:
             return ""
@@ -363,7 +363,9 @@ def format_response_time(sent_str: str, responded_str: str) -> str:
         minutes = rem // 60
         if hours > 0:
             return f"{hours} год {minutes} хв"
-        return f"{minutes} хв"
+        if minutes > 0:
+            return f"{minutes} хв"
+        return "< 1 хв"
     except Exception:
         return ""
 
