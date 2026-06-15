@@ -2155,7 +2155,7 @@ async def process_additional_phones(message: Message, state: FSMContext):
     if text == "❌ Ні":
         await state.update_data(loading_phone=client_phone, unloading_phone=client_phone)
         await message.answer(
-            "Оберіть тип платника:",
+            "Оберіть спосіб оплати:",
             reply_markup=build_reply_keyboard(PAYER_TYPES),
         )
         await state.set_state(Form.payer_type)
@@ -2257,7 +2257,7 @@ async def process_unloading_phone_choice(message: Message, state: FSMContext):
             return
 
         await message.answer(
-            "Оберіть тип платника:",
+            "Оберіть спосіб оплати:",
             reply_markup=build_reply_keyboard(PAYER_TYPES),
         )
         await state.set_state(Form.payer_type)
@@ -2271,7 +2271,7 @@ async def process_unloading_phone_choice(message: Message, state: FSMContext):
             return
 
         await message.answer(
-            "Оберіть тип платника:",
+            "Оберіть спосіб оплати:",
             reply_markup=build_reply_keyboard(PAYER_TYPES),
         )
         await state.set_state(Form.payer_type)
