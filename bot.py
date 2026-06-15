@@ -3065,11 +3065,7 @@ async def client_go_profile_callback(call: CallbackQuery):
     user = call.from_user
     if user is None:
         return
-    profile = await get_user_profile(user.id)
-    if profile is None:
-        await call.message.answer("Профіль поки що порожній. Створіть перше замовлення через /order")
-        return
-    await replace_callback_message(call, build_profile_text(profile), reply_markup=get_profile_keyboard(), parse_mode="HTML")
+    await send_profile_to_chat(call.message.chat.id, user.id)
 
 # =========================
 # MAIN
