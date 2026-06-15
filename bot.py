@@ -351,6 +351,23 @@ async def update_order_status_and_price(order_id: int, status: Optional[str] = N
     asyncio.create_task(update_order_in_sheets(order_id, status=status, price=price))
 
 
+def format_response_time(sent_str: str, responded_str: str) -> str:
+    try:
+        fmt = "%Y-%m-%d %H:%M:%S"
+        sent = datetime.strptime(sent_str, fmt)
+        responded = datetime.strptime(responded_str, fmt)
+        diff = int((responded - sent).total_seconds())
+        if diff < 0:
+            return ""
+        hours, rem = divmod(diff, 3600)
+        minutes = rem // 60
+        if hours > 0:
+            return f"{hours} год {minutes} хв"
+        return f"{minutes} хв"
+    except Exception:
+        return ""
+
+
 async def update_order_dispatcher(
     order_id: int,
     status: str,
@@ -363,12 +380,16 @@ async def update_order_dispatcher(
             "UPDATE orders SET status=$1, dispatcher_username=$2, responded_at=$3, decline_reason=$4 WHERE id=$5",
             status, dispatcher_username, responded_at, decline_reason, order_id,
         )
+        row = await conn.fetchrow("SELECT created_at FROM orders WHERE id=$1", order_id)
+    sent_str = str(row["created_at"]) if row and row["created_at"] else ""
+    response_time = format_response_time(sent_str, responded_at) if sent_str else ""
     asyncio.create_task(update_order_in_sheets(
         order_id,
         status=status,
         dispatcher_username=dispatcher_username,
         responded_at=responded_at,
         decline_reason=decline_reason,
+        response_time=response_time,
     ))
 
 
@@ -397,7 +418,7 @@ SHEETS_HEADERS = [
     "Тел. завантаження", "Тел. розвантаження",
     "Платник", "Деталі платника", "Коментар",
     "Статус", "Ціна", "Telegram ID", "Username",
-    "Час відправки в групу", "Диспетчер", "Час відповіді диспетчера", "Причина відмови",
+    "Час відправки в групу", "Диспетчер", "Час відповіді диспетчера", "Причина відмови", "Час реагування",
 ]
 
 _sheets_client: Optional[gspread.Client] = None
@@ -487,6 +508,7 @@ def _write_order_to_sheets_sync(order_id: int, user: types.User, data: dict, pro
             "",       # Диспетчер
             "",       # Час відповіді диспетчера
             "",       # Причина відмови
+            "",       # Час реагування
         ])
     except Exception:
         logging.exception("Failed to write order to Google Sheets")
@@ -499,6 +521,7 @@ def _update_order_in_sheets_sync(
     dispatcher_username: Optional[str] = None,
     responded_at: Optional[str] = None,
     decline_reason: Optional[str] = None,
+    response_time: Optional[str] = None,
 ):
     client = _get_sheets_client()
     if client is None:
@@ -520,6 +543,8 @@ def _update_order_in_sheets_sync(
             sheet.update_cell(row, SHEETS_HEADERS.index("Час відповіді диспетчера") + 1, responded_at)
         if decline_reason is not None:
             sheet.update_cell(row, SHEETS_HEADERS.index("Причина відмови") + 1, decline_reason)
+        if response_time is not None:
+            sheet.update_cell(row, SHEETS_HEADERS.index("Час реагування") + 1, response_time)
     except Exception:
         logging.exception("Failed to update order in Google Sheets")
 
@@ -536,11 +561,12 @@ async def update_order_in_sheets(
     dispatcher_username: Optional[str] = None,
     responded_at: Optional[str] = None,
     decline_reason: Optional[str] = None,
+    response_time: Optional[str] = None,
 ):
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(
         None,
-        lambda: _update_order_in_sheets_sync(order_id, status, price, dispatcher_username, responded_at, decline_reason),
+        lambda: _update_order_in_sheets_sync(order_id, status, price, dispatcher_username, responded_at, decline_reason, response_time),
     )
 
 # =========================
@@ -2155,10 +2181,10 @@ async def process_additional_phones(message: Message, state: FSMContext):
     if text == "❌ Ні":
         await state.update_data(loading_phone=client_phone, unloading_phone=client_phone)
         await message.answer(
-            "Оберіть спосіб оплати:",
-            reply_markup=build_reply_keyboard(PAYER_TYPES),
+            "Бажаєте додати додаткову інформацію до замовлення?",
+            reply_markup=build_reply_keyboard(["📷 Фото", "💬 Коментар", "⏭️ Пропустити"]),
         )
-        await state.set_state(Form.payer_type)
+        await state.set_state(Form.comment_choice)
         return
 
     if text == "✅ Так":
@@ -2257,10 +2283,10 @@ async def process_unloading_phone_choice(message: Message, state: FSMContext):
             return
 
         await message.answer(
-            "Оберіть спосіб оплати:",
-            reply_markup=build_reply_keyboard(PAYER_TYPES),
+            "Бажаєте додати додаткову інформацію до замовлення?",
+            reply_markup=build_reply_keyboard(["📷 Фото", "💬 Коментар", "⏭️ Пропустити"]),
         )
-        await state.set_state(Form.payer_type)
+        await state.set_state(Form.comment_choice)
         return
 
     if text == "Номер із завантаження":
@@ -2271,10 +2297,10 @@ async def process_unloading_phone_choice(message: Message, state: FSMContext):
             return
 
         await message.answer(
-            "Оберіть спосіб оплати:",
-            reply_markup=build_reply_keyboard(PAYER_TYPES),
+            "Бажаєте додати додаткову інформацію до замовлення?",
+            reply_markup=build_reply_keyboard(["📷 Фото", "💬 Коментар", "⏭️ Пропустити"]),
         )
-        await state.set_state(Form.payer_type)
+        await state.set_state(Form.comment_choice)
         return
 
     if text == "Інший номер":
@@ -2311,10 +2337,10 @@ async def process_unloading_phone(message: Message, state: FSMContext):
         return
 
     await message.answer(
-        "Оберіть тип платника:",
-        reply_markup=build_reply_keyboard(PAYER_TYPES),
+        "Бажаєте додати додаткову інформацію до замовлення?",
+        reply_markup=build_reply_keyboard(["📷 Фото", "💬 Коментар", "⏭️ Пропустити"]),
     )
-    await state.set_state(Form.payer_type)
+    await state.set_state(Form.comment_choice)
 
 
 @router.message(Form.payer_type)
@@ -2328,11 +2354,7 @@ async def process_payer_type(message: Message, state: FSMContext):
 
     if text == "Готівка":
         await state.update_data(payer_type="Готівка", payer_details="-")
-        await message.answer(
-            "Бажаєте додати додаткову інформацію до замовлення?",
-            reply_markup=build_reply_keyboard(["📷 Фото", "💬 Коментар", "⏭️ Пропустити"]),
-        )
-        await state.set_state(Form.comment_choice)
+        await show_confirmation(message, state)
         return
 
     if text == "БН":
@@ -2372,11 +2394,7 @@ async def process_payer_details(message: Message, state: FSMContext):
         return
 
     await state.update_data(payer_details=text)
-    await message.answer(
-        "Бажаєте додати коментар до замовлення?",
-        reply_markup=build_reply_keyboard(["✅ Так", "❌ Ні"]),
-    )
-    await state.set_state(Form.comment_choice)
+    await show_confirmation(message, state)
 
 
 @router.message(Form.comment_choice)
@@ -2390,7 +2408,11 @@ async def process_comment_choice(message: Message, state: FSMContext):
 
     if text == "⏭️ Пропустити":
         await state.update_data(comment="", photo_file_id=None)
-        await show_confirmation(message, state)
+        await message.answer(
+            "Оберіть спосіб оплати:",
+            reply_markup=build_reply_keyboard(PAYER_TYPES),
+        )
+        await state.set_state(Form.payer_type)
         return
 
     if text == "💬 Коментар":
@@ -2428,7 +2450,11 @@ async def process_photo(message: Message, state: FSMContext):
 
     file_id = message.photo[-1].file_id
     await state.update_data(photo_file_id=file_id, comment="")
-    await show_confirmation(message, state)
+    await message.answer(
+        "Оберіть спосіб оплати:",
+        reply_markup=build_reply_keyboard(PAYER_TYPES),
+    )
+    await state.set_state(Form.payer_type)
 
 
 @router.message(Form.comment)
@@ -2448,7 +2474,11 @@ async def process_comment(message: Message, state: FSMContext):
         return
 
     await state.update_data(comment=text)
-    await show_confirmation(message, state)
+    await message.answer(
+        "Оберіть спосіб оплати:",
+        reply_markup=build_reply_keyboard(PAYER_TYPES),
+    )
+    await state.set_state(Form.payer_type)
 
 # =========================
 # EDIT FLOW
