@@ -143,6 +143,7 @@ class Form(StatesGroup):
     oversize_support = State()
     confirmation = State()
     history_browse = State()
+    photo = State()
 
 
 # =========================
@@ -1148,6 +1149,9 @@ def build_client_summary(data: dict) -> str:
 
     if data.get("comment"):
         lines.append(f"<b>📝 Коментар:</b> {safe_text(data.get('comment'))}")
+
+    if data.get("photo_file_id"):
+        lines.append("<b>📷 Фото:</b> прикріплено")
 
     lines.append("")
     lines.append("<b>Підтверджуєте заявку?</b>")
@@ -2325,8 +2329,8 @@ async def process_payer_type(message: Message, state: FSMContext):
     if text == "Готівка":
         await state.update_data(payer_type="Готівка", payer_details="-")
         await message.answer(
-            "Бажаєте додати коментар до замовлення?",
-            reply_markup=build_reply_keyboard(["✅ Так", "❌ Ні"]),
+            "Бажаєте додати додаткову інформацію до замовлення?",
+            reply_markup=build_reply_keyboard(["📷 Фото", "💬 Коментар", "⏭️ Пропустити"]),
         )
         await state.set_state(Form.comment_choice)
         return
@@ -2384,12 +2388,12 @@ async def process_comment_choice(message: Message, state: FSMContext):
 
     text = message.text or ""
 
-    if text == "❌ Ні":
-        await state.update_data(comment="")
+    if text == "⏭️ Пропустити":
+        await state.update_data(comment="", photo_file_id=None)
         await show_confirmation(message, state)
         return
 
-    if text == "✅ Так":
+    if text == "💬 Коментар":
         await message.answer(
             "Введіть ваш коментар до замовлення:",
             reply_markup=ReplyKeyboardRemove(),
@@ -2397,7 +2401,34 @@ async def process_comment_choice(message: Message, state: FSMContext):
         await state.set_state(Form.comment)
         return
 
-    await message.answer("Будь ласка, використовуйте кнопки.", reply_markup=build_reply_keyboard(["✅ Так", "❌ Ні"]))
+    if text == "📷 Фото":
+        await message.answer(
+            "Надішліть фото до замовлення:",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        await state.set_state(Form.photo)
+        return
+
+    await message.answer(
+        "Будь ласка, використовуйте кнопки.",
+        reply_markup=build_reply_keyboard(["📷 Фото", "💬 Коментар", "⏭️ Пропустити"]),
+    )
+
+
+@router.message(Form.photo)
+async def process_photo(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
+
+    if not message.photo:
+        await message.answer("Будь ласка, надішліть саме фото.")
+        return
+
+    file_id = message.photo[-1].file_id
+    await state.update_data(photo_file_id=file_id, comment="")
+    await show_confirmation(message, state)
 
 
 @router.message(Form.comment)
@@ -2858,6 +2889,17 @@ async def process_confirmation(message: Message, state: FSMContext):
             disable_web_page_preview=True,
             reply_markup=disp_kb.as_markup(),
         )
+
+        photo_file_id = data.get("photo_file_id")
+        if photo_file_id:
+            try:
+                await bot.send_photo(
+                    ADMIN_CHAT_ID,
+                    photo_file_id,
+                    caption=f"📷 Фото до заявки #{order_id}",
+                )
+            except Exception:
+                logging.warning("Failed to send photo for order %s", order_id)
 
         await restore_commands(user.id)
         await message.answer(
