@@ -1258,16 +1258,16 @@ def build_admin_summary(user: types.User, data: dict, order_id: int, profile: Op
     if data.get("weight"):
         lines.append(f"<b>⚖️ Вага:</b> {safe_text(data.get('weight'))}")
 
+    lines.extend([
+        f"<b>📍 Адреса завантаження:</b> {safe_text(data.get('loading_address'))}",
+        f"<b>📍 Адреса розвантаження:</b> {safe_text(data.get('unloading_address'))}",
+    ])
+
     lines.append(f"<b>⏰ Терміновість:</b> {safe_text(data.get('urgency_type'))}")
 
     if data.get("urgency_type") == "На інший день":
         lines.append(f"<b>📅 Дата:</b> {safe_text(data.get('scheduled_date'))}")
         lines.append(f"<b>🕐 Час:</b> {safe_text(data.get('scheduled_time'))}")
-
-    lines.extend([
-        f"<b>📍 Адреса завантаження:</b> {safe_text(data.get('loading_address'))}",
-        f"<b>📍 Адреса розвантаження:</b> {safe_text(data.get('unloading_address'))}",
-    ])
 
     payer_line = f"<b>💰 Платник:</b> {safe_text(data.get('payer_type'))}"
     if data.get("payer_type") == "БН" and data.get("payer_details"):
