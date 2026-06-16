@@ -2964,7 +2964,7 @@ async def process_confirmation(message: Message, state: FSMContext):
         await message.answer(
             "🎉 <b>Дякуємо за ваше замовлення!</b>\n\n"
             "✅ Вашу заявку успішно прийнято.\n"
-            "📞 Наш менеджер зателефонує вам найближчим часом для підтвердження деталей.\n\n"
+            "📞 Наш менеджер зателефонує вам найближчим часом для уточнення деталей.\n\n"
             "<i>Очікуйте дзвінка!</i>",
             reply_markup=ReplyKeyboardRemove(),
             parse_mode="HTML",
