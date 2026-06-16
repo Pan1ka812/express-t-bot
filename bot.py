@@ -454,10 +454,9 @@ def _setup_sheets_sync():
             first_row = sheet.row_values(1)
         except Exception:
             first_row = []
-        if first_row != SHEETS_HEADERS:
-            sheet.clear()
+        if not first_row:
             sheet.append_row(SHEETS_HEADERS)
-            sheet.format("A1:W1", {
+            sheet.format("A1:AB1", {
                 "textFormat": {"bold": True, "fontSize": 10},
                 "backgroundColor": {"red": 0.26, "green": 0.52, "blue": 0.96},
                 "horizontalAlignment": "CENTER",
