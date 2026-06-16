@@ -1189,7 +1189,7 @@ def build_client_summary(data: dict) -> str:
     lines = [
         "<b>📋 Ваша заявка на перевезення:</b>",
         "",
-        f"<b>👤 Як до вас звертатися:</b> {safe_text(data.get('customer_name'))}",
+        f"<b>👤 Ім'я:</b> {safe_text(data.get('customer_name'))}",
         f"<b>🚛 Тип послуги:</b> {safe_text(data.get('service_type'))}",
         f"<b>📦 Вантаж:</b> {cargo_label}",
     ]
