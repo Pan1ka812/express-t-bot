@@ -971,25 +971,28 @@ def is_valid_address(address: str) -> bool:
     return True
 
 
-def parse_weight(weight_text: str) -> Optional[int]:
+def parse_weight(weight_text: str) -> Optional[str]:
     if not weight_text:
         return None
 
     text = weight_text.strip().lower().replace(",", ".")
-    match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(кг|kg|т|тон|тонн)?", text)
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(кг|kg|т|тон|тонн|tonnes?)?", text)
     if not match:
         return None
 
     value = float(match.group(1))
     unit = match.group(2)
 
-    if unit in {"т", "тон", "тонн"}:
-        value *= 1000
-
     if value <= 0:
         return None
 
-    return int(value)
+    # якщо ввели кг — конвертуємо в тони
+    if unit in {"кг", "kg"}:
+        value = value / 1000
+
+    # зберігаємо в тонах
+    formatted = f"{value:g}"
+    return f"{formatted} т"
 
 
 def normalize_dimensions(dimensions_text: str) -> Optional[str]:
@@ -1808,7 +1811,7 @@ async def process_dimensions(message: Message, state: FSMContext):
         await state.set_state(Form.oversize_support)
         return
 
-    await message.answer("Вкажіть вагу (кг):", reply_markup=ReplyKeyboardRemove())
+    await message.answer("Вкажіть вагу (т):", reply_markup=ReplyKeyboardRemove())
     await state.set_state(Form.weight)
 
 
@@ -1823,7 +1826,7 @@ async def process_oversize_support(message: Message, state: FSMContext):
 
     if text == "Супроводжуємо":
         await state.update_data(support_required="потрібен")
-        await message.answer("Вкажіть вагу (кг):", reply_markup=ReplyKeyboardRemove())
+        await message.answer("Вкажіть вагу (т):", reply_markup=ReplyKeyboardRemove())
         await state.set_state(Form.weight)
         return
 
@@ -1850,10 +1853,10 @@ async def process_weight(message: Message, state: FSMContext):
     text = (message.text or "").strip()
     weight = parse_weight(text)
     if weight is None:
-        await message.answer("Будь ласка, введіть коректну вагу. Наприклад: 1000 або 1.5 т")
+        await message.answer("Будь ласка, введіть коректну вагу. Наприклад: 5 або 1.5 т")
         return
 
-    await state.update_data(weight=str(weight))
+    await state.update_data(weight=weight)
     data = await state.get_data()
 
     if data.get("edit_mode"):
