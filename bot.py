@@ -472,6 +472,119 @@ async def setup_sheets():
     await loop.run_in_executor(None, _setup_sheets_sync)
 
 
+PRICE_SERVICES = ["Евакуатор", "Гідравлічна платформа", "Кран-маніпулятор", "Вантажні перевезення"]
+PRICE_CAR_TYPES = ["Легковий", "Джип", "Мікроавтобус", "Автобус", "Вантажний авто", "Інше"]
+PRICE_SHEET_NAME = "Ціни"
+
+
+def _setup_price_sheet_sync():
+    client = _get_sheets_client()
+    if client is None:
+        return
+    try:
+        spreadsheet = client.open_by_key(GOOGLE_SPREADSHEET_ID)
+        try:
+            ws = spreadsheet.worksheet(PRICE_SHEET_NAME)
+        except Exception:
+            ws = spreadsheet.add_worksheet(title=PRICE_SHEET_NAME, rows=40, cols=10)
+
+        header_row = [""] + PRICE_SERVICES
+        dispatch_label = ["Ціна подачі від (грн)", "", "", "", ""]
+        km_label = ["Ціна км від (грн/км)", "", "", "", ""]
+
+        # Row 1: table 1 title
+        # Row 2: header (car type | services...)
+        # Rows 3-8: car types
+        # Row 9: empty
+        # Row 10: table 2 title
+        # Row 11: header
+        # Rows 12-17: car types
+
+        existing = ws.get_all_values()
+        if existing and existing[0] and existing[0][0] == "Ціна подачі від (грн)":
+            return  # already set up
+
+        ws.clear()
+        rows = []
+        rows.append(["Ціна подачі від (грн)"] + [""] * len(PRICE_SERVICES))
+        rows.append(header_row)
+        for car in PRICE_CAR_TYPES:
+            rows.append([car] + [""] * len(PRICE_SERVICES))
+        rows.append([""] * (len(PRICE_SERVICES) + 1))
+        rows.append(["Ціна км від (грн/км)"] + [""] * len(PRICE_SERVICES))
+        rows.append(header_row)
+        for car in PRICE_CAR_TYPES:
+            rows.append([car] + [""] * len(PRICE_SERVICES))
+
+        ws.update("A1", rows)
+
+        # Format title rows bold+color
+        blue = {"red": 0.26, "green": 0.52, "blue": 0.96}
+        light = {"red": 0.85, "green": 0.92, "blue": 1.0}
+        n_cols = len(PRICE_SERVICES) + 1
+        col_letter = chr(ord("A") + n_cols - 1)
+
+        ws.format(f"A1:{col_letter}1", {"textFormat": {"bold": True}, "backgroundColor": blue})
+        ws.format(f"A2:{col_letter}2", {"textFormat": {"bold": True}, "backgroundColor": light})
+        row10 = 2 + len(PRICE_CAR_TYPES) + 2
+        row11 = row10 + 1
+        ws.format(f"A{row10}:{col_letter}{row10}", {"textFormat": {"bold": True}, "backgroundColor": blue})
+        ws.format(f"A{row11}:{col_letter}{row11}", {"textFormat": {"bold": True}, "backgroundColor": light})
+        ws.freeze(rows=0, cols=1)
+    except Exception:
+        logging.exception("Failed to setup price sheet")
+
+
+async def setup_price_sheet():
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _setup_price_sheet_sync)
+
+
+def _read_prices_sync(service_type: str, car_type: str):
+    """Returns (dispatch_price, km_price) strings or (None, None)."""
+    client = _get_sheets_client()
+    if client is None:
+        return None, None
+    try:
+        spreadsheet = client.open_by_key(GOOGLE_SPREADSHEET_ID)
+        ws = spreadsheet.worksheet(PRICE_SHEET_NAME)
+        all_vals = ws.get_all_values()
+        if not all_vals:
+            return None, None
+
+        def find_price(title_keyword, service, car):
+            # Find title row
+            title_row_idx = None
+            for i, row in enumerate(all_vals):
+                if row and title_keyword in row[0]:
+                    title_row_idx = i
+                    break
+            if title_row_idx is None:
+                return None
+            header_row = all_vals[title_row_idx + 1] if title_row_idx + 1 < len(all_vals) else []
+            try:
+                col_idx = header_row.index(service)
+            except ValueError:
+                return None
+            for row in all_vals[title_row_idx + 2:]:
+                if row and row[0] == car:
+                    val = row[col_idx] if col_idx < len(row) else ""
+                    return val.strip() if val.strip() else None
+            return None
+
+        dispatch = find_price("Ціна подачі від", service_type, car_type)
+        km = find_price("Ціна км від", service_type, car_type)
+        return dispatch, km
+    except Exception:
+        logging.exception("Failed to read prices")
+        return None, None
+
+
+async def read_prices(service_type: str, car_type: str):
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _read_prices_sync, service_type, car_type)
+
+
 def _write_order_to_sheets_sync(order_id: int, user: types.User, data: dict, profile: Optional[dict]):
     client = _get_sheets_client()
     if client is None:
@@ -2345,6 +2458,29 @@ async def process_unloading_phone(message: Message, state: FSMContext):
     await state.set_state(Form.comment_choice)
 
 
+async def ask_for_payer_with_price(message: Message, state: FSMContext):
+    data = await state.get_data()
+    service_type = data.get("service_type", "")
+    car_type = data.get("cargo_name", "")
+
+    dispatch_price, km_price = await read_prices(service_type, car_type)
+
+    if dispatch_price or km_price:
+        parts = [f"💰 <b>Орієнтовні ціни для вашого замовлення:</b>"]
+        if dispatch_price:
+            parts.append(f"• Подача: від <b>{dispatch_price} грн</b>")
+        if km_price:
+            parts.append(f"• Ціна км: від <b>{km_price} грн/км</b>")
+        parts.append("")
+        await message.answer("\n".join(parts), parse_mode="HTML")
+
+    await message.answer(
+        "Оберіть спосіб оплати:",
+        reply_markup=build_reply_keyboard(PAYER_TYPES),
+    )
+    await state.set_state(Form.payer_type)
+
+
 @router.message(Form.payer_type)
 async def process_payer_type(message: Message, state: FSMContext):
     if await deny_if_not_private_message(message):
@@ -2410,11 +2546,7 @@ async def process_comment_choice(message: Message, state: FSMContext):
 
     if text == "⏭️ Пропустити":
         await state.update_data(comment="", photo_file_id=None)
-        await message.answer(
-            "Оберіть спосіб оплати:",
-            reply_markup=build_reply_keyboard(PAYER_TYPES),
-        )
-        await state.set_state(Form.payer_type)
+        await ask_for_payer_with_price(message, state)
         return
 
     if text == "💬 Коментар":
@@ -2452,11 +2584,7 @@ async def process_photo(message: Message, state: FSMContext):
 
     file_id = message.photo[-1].file_id
     await state.update_data(photo_file_id=file_id, comment="")
-    await message.answer(
-        "Оберіть спосіб оплати:",
-        reply_markup=build_reply_keyboard(PAYER_TYPES),
-    )
-    await state.set_state(Form.payer_type)
+    await ask_for_payer_with_price(message, state)
 
 
 @router.message(Form.comment)
@@ -2476,11 +2604,7 @@ async def process_comment(message: Message, state: FSMContext):
         return
 
     await state.update_data(comment=text)
-    await message.answer(
-        "Оберіть спосіб оплати:",
-        reply_markup=build_reply_keyboard(PAYER_TYPES),
-    )
-    await state.set_state(Form.payer_type)
+    await ask_for_payer_with_price(message, state)
 
 # =========================
 # EDIT FLOW
@@ -3081,6 +3205,7 @@ if __name__ == "__main__":
     async def main():
         await init_db()
         await setup_sheets()
+        await setup_price_sheet()
         await bot.delete_webhook(drop_pending_updates=True)
         await bot.set_my_commands(BOT_COMMANDS)
         print("Бот запущено...")
