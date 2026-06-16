@@ -163,7 +163,6 @@ async def init_db():
             telegram_username TEXT,
             customer_name TEXT,
             phone TEXT,
-            client_tag TEXT DEFAULT 'Новий клієнт',
             note TEXT DEFAULT '',
             orders_count INTEGER DEFAULT 0,
             created_at TEXT
@@ -230,8 +229,8 @@ async def upsert_user(
         if row is None:
             await conn.execute("""
             INSERT INTO users (telegram_id, telegram_full_name, telegram_username,
-                customer_name, phone, client_tag, note, orders_count, created_at)
-            VALUES ($1,$2,$3,$4,$5,'Новий клієнт','',0,$6)
+                customer_name, phone, note, orders_count, created_at)
+            VALUES ($1,$2,$3,$4,$5,'',0,$6)
             """, telegram_id, telegram_full_name, telegram_username,
                 customer_name or "", phone or "", now)
         else:
@@ -280,7 +279,7 @@ async def get_user_profile(telegram_id: int) -> Optional[dict]:
     async with _db_pool.acquire() as conn:
         row = await conn.fetchrow("""
         SELECT telegram_id,telegram_full_name,telegram_username,customer_name,phone,
-               client_tag,note,orders_count,created_at
+               note,orders_count,created_at
         FROM users WHERE telegram_id=$1
         """, telegram_id)
     return dict(row) if row else None
@@ -304,10 +303,6 @@ async def get_orders_page(telegram_id: int, offset: int, limit: int = 5) -> list
     return [dict(r) for r in rows]
 
 
-async def get_last_orders(telegram_id: int, limit: int = 30) -> list[dict]:
-    return await get_orders_page(telegram_id, offset=0, limit=limit)
-
-
 async def get_order_by_id_for_user(order_id: int, telegram_id: int) -> Optional[dict]:
     async with _db_pool.acquire() as conn:
         row = await conn.fetchrow("""
@@ -327,16 +322,6 @@ async def get_full_order_by_id(order_id: int, telegram_id: int) -> Optional[dict
                payer_type,payer_details,comment,support_required,price,status,created_at
         FROM orders WHERE id=$1 AND telegram_id=$2
         """, order_id, telegram_id)
-    return dict(row) if row else None
-
-
-async def get_order_by_id(order_id: int) -> Optional[dict]:
-    async with _db_pool.acquire() as conn:
-        row = await conn.fetchrow("""
-        SELECT id,telegram_id,customer_name,service_type,cargo_name,custom_cargo_description,
-               loading_address,unloading_address,price,status,created_at
-        FROM orders WHERE id=$1
-        """, order_id)
     return dict(row) if row else None
 
 
@@ -393,13 +378,6 @@ async def update_order_dispatcher(
         decline_reason=decline_reason,
         response_time=response_time,
     ))
-
-
-async def set_user_tag(telegram_id: int, client_tag: str):
-    async with _db_pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE users SET client_tag=$1 WHERE telegram_id=$2", client_tag, telegram_id
-        )
 
 
 async def set_user_note(telegram_id: int, note: str):
@@ -488,16 +466,6 @@ def _setup_price_sheet_sync():
             ws = spreadsheet.add_worksheet(title=PRICE_SHEET_NAME, rows=40, cols=10)
 
         header_row = [""] + PRICE_SERVICES
-        dispatch_label = ["Ціна подачі від (грн)", "", "", "", ""]
-        km_label = ["Ціна км від (грн/км)", "", "", "", ""]
-
-        # Row 1: table 1 title
-        # Row 2: header (car type | services...)
-        # Rows 3-8: car types
-        # Row 9: empty
-        # Row 10: table 2 title
-        # Row 11: header
-        # Rows 12-17: car types
 
         existing = ws.get_all_values()
         if existing and existing[0] and existing[0][0] == "Ціна подачі від (грн)":
@@ -842,29 +810,6 @@ async def replace_callback_message(
             )
         except Exception:
             pass
-            return
-
-            await call.message.edit_text(
-                text=text,
-                reply_markup=reply_markup,
-                parse_mode=parse_mode,
-                disable_web_page_preview=True,
-            )
-
-    except Exception as e:
-        error_text = str(e).lower()
-
-        if (
-            "message is not modified" in error_text
-            or "message to edit not found" in error_text
-            or "message can't be edited" in error_text
-            or "there is no text in the message to edit" in error_text
-            or "there is no caption in the message to edit" in error_text
-        ):
-            return
-
-        logging.exception("replace_callback_message failed")
-        return
 # =========================
 # HELPERS / VALIDATORS
 # =========================
@@ -1233,19 +1178,6 @@ def get_profile_keyboard():
     kb.adjust(2)
     return kb.as_markup()
 
-def get_history_actions_keyboard():
-    kb = InlineKeyboardBuilder()
-
-    kb.add(
-        InlineKeyboardButton(
-            text="⬅️ Назад до профілю",
-            callback_data="history_back_to_profile",
-        )
-    )
-
-    kb.adjust(1)
-    return kb.as_markup()
-
 def build_client_summary(data: dict) -> str:
     cargo_label = safe_text(data.get("cargo_name"))
     if data.get("cargo_name") == "Інше" and data.get("custom_cargo_description"):
@@ -1304,7 +1236,6 @@ def build_admin_summary(user: types.User, data: dict, order_id: int, profile: Op
     if data.get("cargo_name") == "Інше" and data.get("custom_cargo_description"):
         cargo_label = f"Інше ({safe_text(data.get('custom_cargo_description'))})"
 
-    client_tag = profile["client_tag"] if profile else "Новий клієнт"
     orders_count = profile["orders_count"] if profile else 0
     note = profile["note"] if profile else ""
 
@@ -1349,7 +1280,6 @@ def build_admin_summary(user: types.User, data: dict, order_id: int, profile: Op
         f"<b>🆔 ID:</b> {user.id}",
         f"<b>📱 Username:</b> @{html.escape(user.username) if user.username else 'немає'}",
         f"<b>🔗 Посилання:</b> <a href='tg://user?id={user.id}'>Написати клієнту</a>",
-        f"<b>⭐ Статус клієнта:</b> {safe_text(client_tag)}",
         f"<b>📦 Замовлень через бота:</b> {orders_count}",
     ])
 
@@ -1386,7 +1316,6 @@ def build_profile_text(profile: dict) -> str:
         "",
         f"<b>Ім'я:</b> {safe_text(customer_name)}",
         f"<b>📞 Телефон:</b> {safe_text(profile.get('phone'))}",
-        f"<b>⭐ Статус:</b> {safe_text(profile.get('client_tag'), 'Новий клієнт')}",
         f"<b>📦 Замовлень через бота:</b> {profile.get('orders_count', 0)}",
     ]
 
@@ -1679,31 +1608,6 @@ async def banlist_command(message: Message):
     text = "🚫 <b>Заблоковані користувачі:</b>\n\n" + "\n".join(str(uid) for uid in banned)
     await message.answer(text, parse_mode="HTML")
 
-
-
-@router.message(Command("settag"))
-async def settag_command(message: Message):
-    if not is_admin_chat_message(message):
-        return
-
-    parts = (message.text or "").split(maxsplit=2)
-    if len(parts) < 3:
-        await message.answer("Формат: /settag [ID_клієнта] [статус]")
-        return
-
-    try:
-        user_id = int(parts[1])
-    except ValueError:
-        await message.answer("Формат: /settag [ID_клієнта] [статус]")
-        return
-
-    tag = parts[2].strip()
-    if len(tag) < 2:
-        await message.answer("Статус занадто короткий.")
-        return
-
-    await set_user_tag(user_id, tag)
-    await message.answer(f"⭐ Клієнту {user_id} встановлено статус: {tag}")
 
 
 @router.message(Command("setnote"))
@@ -3069,7 +2973,7 @@ async def process_confirmation(message: Message, state: FSMContext):
         return
 
     if text == "❌ Скасувати":
-        await restore_commands(user.id)
+        await restore_commands(message.from_user.id)
         await message.answer(
             "❌ Заявку скасовано. Щоб створити нову заявку, натисніть /order",
             reply_markup=ReplyKeyboardRemove(),
