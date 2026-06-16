@@ -108,7 +108,7 @@ ORDER_STATUS_CREATED = "Створено"
 ORDER_STATUS_ACCEPTED = "Прийнято в роботу"
 ORDER_STATUS_REJECTED = "Не прийнято"
 
-DECLINE_REASONS = ["Відмова клієнта", "Вже неактуально", "Дорого"]
+DECLINE_REASONS = ["Відмова клієнта", "Вже неактуально", "Дорого", "Некоректно"]
 
 MANUAL_PHONE_INPUT_TEXT = "✍️ Ввести інший номер вручну"
 PAGE_SIZE = 5
@@ -422,12 +422,60 @@ def _get_sheets_client() -> Optional[gspread.Client]:
     return _sheets_client
 
 
+def _apply_status_conditional_formatting(spreadsheet, sheet_id: int, status_col: int):
+    """Applies green/red/yellow conditional formatting to the Status column."""
+    col_letter = chr(ord("A") + status_col)
+    rules = [
+        # Зелений — Прийнято в роботу
+        {
+            "addConditionalFormatRule": {
+                "rule": {
+                    "ranges": [{"sheetId": sheet_id, "startColumnIndex": status_col, "endColumnIndex": status_col + 1, "startRowIndex": 1}],
+                    "booleanRule": {
+                        "condition": {"type": "TEXT_EQ", "values": [{"userEnteredValue": ORDER_STATUS_ACCEPTED}]},
+                        "format": {"backgroundColor": {"red": 0.71, "green": 0.89, "blue": 0.71}},
+                    },
+                },
+                "index": 0,
+            }
+        },
+        # Червоний — Не прийнято
+        {
+            "addConditionalFormatRule": {
+                "rule": {
+                    "ranges": [{"sheetId": sheet_id, "startColumnIndex": status_col, "endColumnIndex": status_col + 1, "startRowIndex": 1}],
+                    "booleanRule": {
+                        "condition": {"type": "TEXT_EQ", "values": [{"userEnteredValue": ORDER_STATUS_REJECTED}]},
+                        "format": {"backgroundColor": {"red": 0.93, "green": 0.60, "blue": 0.60}},
+                    },
+                },
+                "index": 1,
+            }
+        },
+        # Жовтий — Створено
+        {
+            "addConditionalFormatRule": {
+                "rule": {
+                    "ranges": [{"sheetId": sheet_id, "startColumnIndex": status_col, "endColumnIndex": status_col + 1, "startRowIndex": 1}],
+                    "booleanRule": {
+                        "condition": {"type": "TEXT_EQ", "values": [{"userEnteredValue": ORDER_STATUS_CREATED}]},
+                        "format": {"backgroundColor": {"red": 1.0, "green": 0.95, "blue": 0.60}},
+                    },
+                },
+                "index": 2,
+            }
+        },
+    ]
+    spreadsheet.batch_update({"requests": rules})
+
+
 def _setup_sheets_sync():
     client = _get_sheets_client()
     if client is None:
         return
     try:
-        sheet = client.open_by_key(GOOGLE_SPREADSHEET_ID).sheet1
+        spreadsheet = client.open_by_key(GOOGLE_SPREADSHEET_ID)
+        sheet = spreadsheet.sheet1
         try:
             first_row = sheet.row_values(1)
         except Exception:
@@ -440,6 +488,12 @@ def _setup_sheets_sync():
                 "horizontalAlignment": "CENTER",
             })
             sheet.freeze(rows=1)
+        # Apply status column formatting (always, idempotent enough for startup)
+        status_col = SHEETS_HEADERS.index("Статус")
+        try:
+            _apply_status_conditional_formatting(spreadsheet, sheet.id, status_col)
+        except Exception:
+            logging.warning("Could not apply conditional formatting")
     except Exception:
         logging.exception("Failed to setup Google Sheets")
 
