@@ -105,6 +105,7 @@ ADDRESS_HINT_WORDS = {
 
 
 ORDER_STATUS_CREATED = "Створено"
+ORDER_STATUS_IN_PROGRESS = "В обробці"
 ORDER_STATUS_ACCEPTED = "Прийнято в роботу"
 ORDER_STATUS_REJECTED = "Не прийнято"
 
@@ -463,6 +464,19 @@ def _apply_status_conditional_formatting(spreadsheet, sheet_id: int, status_col:
                     },
                 },
                 "index": 2,
+            }
+        },
+        # Помаранчевий — В обробці
+        {
+            "addConditionalFormatRule": {
+                "rule": {
+                    "ranges": [{"sheetId": sheet_id, "startColumnIndex": status_col, "endColumnIndex": status_col + 1, "startRowIndex": 1}],
+                    "booleanRule": {
+                        "condition": {"type": "TEXT_EQ", "values": [{"userEnteredValue": ORDER_STATUS_IN_PROGRESS}]},
+                        "format": {"backgroundColor": {"red": 1.0, "green": 0.75, "blue": 0.40}},
+                    },
+                },
+                "index": 3,
             }
         },
     ]
@@ -2728,6 +2742,8 @@ async def _render_orders_page(chat_id: int, user_id: int, state: FSMContext, off
             status_text = "✅ Прийнято в роботу"
         elif status == ORDER_STATUS_REJECTED:
             status_text = "❌ Не прийнято"
+        elif status == ORDER_STATUS_IN_PROGRESS:
+            status_text = "🔄 В обробці"
         elif status == ORDER_STATUS_CREATED:
             status_text = "🆕 Нове"
         else:
@@ -2943,11 +2959,12 @@ async def show_confirmation(message: Message, state: FSMContext):
     confirm_kb.add(KeyboardButton(text="❌ Скасувати"))
     confirm_kb.adjust(2)
 
-    await message.answer(
+    summary_msg = await message.answer(
         summary,
         reply_markup=get_main_edit_keyboard(),
         parse_mode="HTML",
     )
+    await state.update_data(summary_msg_id=summary_msg.message_id)
     await message.answer(
         "Використовуйте кнопки нижче для підтвердження.",
         reply_markup=confirm_kb.as_markup(resize_keyboard=True),
@@ -2982,6 +2999,18 @@ async def process_confirmation(message: Message, state: FSMContext):
         order_id = await create_order(user.id, data)
         await increment_user_orders_count(user.id)
 
+        # Прибираємо кнопку редагування з повідомлення заявки
+        summary_msg_id = data.get("summary_msg_id")
+        if summary_msg_id:
+            try:
+                await bot.edit_message_reply_markup(
+                    chat_id=message.chat.id,
+                    message_id=summary_msg_id,
+                    reply_markup=None,
+                )
+            except Exception:
+                pass
+
         profile = await get_user_profile(user.id)
         admin_text = build_admin_summary(user, data, order_id, profile=profile)
 
@@ -2989,14 +3018,10 @@ async def process_confirmation(message: Message, state: FSMContext):
 
         disp_kb = InlineKeyboardBuilder()
         disp_kb.add(InlineKeyboardButton(
-            text="✅ Прийнято в роботу",
-            callback_data=f"disp_accept:{order_id}:{user.id}",
+            text="🔄 Взяти в обробку",
+            callback_data=f"disp_take:{order_id}:{user.id}",
         ))
-        disp_kb.add(InlineKeyboardButton(
-            text="❌ Не прийнято",
-            callback_data=f"disp_reject:{order_id}:{user.id}",
-        ))
-        disp_kb.adjust(2)
+        disp_kb.adjust(1)
 
         await bot.send_message(
             ADMIN_CHAT_ID,
@@ -3043,6 +3068,43 @@ async def process_confirmation(message: Message, state: FSMContext):
 # =========================
 # DISPATCHER FLOW
 # =========================
+@router.callback_query(lambda c: c.data and c.data.startswith("disp_take:"))
+async def disp_take_callback(call: CallbackQuery):
+    await call.answer()
+    parts = call.data.split(":")
+    if len(parts) != 3:
+        return
+    order_id = int(parts[1])
+    client_id = parts[2]
+
+    dispatcher = call.from_user
+    dispatcher_tag = f"@{dispatcher.username}" if dispatcher.username else dispatcher.full_name or str(dispatcher.id)
+
+    await update_order_status_and_price(order_id, status=ORDER_STATUS_IN_PROGRESS)
+
+    accept_reject_kb = InlineKeyboardBuilder()
+    accept_reject_kb.add(InlineKeyboardButton(
+        text="✅ Прийнято в роботу",
+        callback_data=f"disp_accept:{order_id}:{client_id}",
+    ))
+    accept_reject_kb.add(InlineKeyboardButton(
+        text="❌ Не прийнято",
+        callback_data=f"disp_reject:{order_id}:{client_id}",
+    ))
+    accept_reject_kb.adjust(2)
+
+    try:
+        await call.message.edit_text(
+            (call.message.text or call.message.caption or "") +
+            f"\n\n🔄 <b>В обробці.</b> {html.escape(dispatcher_tag)}",
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=accept_reject_kb.as_markup(),
+        )
+    except Exception:
+        pass
+
+
 @router.callback_query(lambda c: c.data and c.data.startswith("disp_accept:"))
 async def disp_accept_callback(call: CallbackQuery):
     await call.answer()
