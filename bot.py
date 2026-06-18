@@ -3305,8 +3305,7 @@ async def disp_reason_callback(call: CallbackQuery):
     try:
         await bot.send_message(
             client_id,
-            "❌ <b>На жаль, ваше замовлення не було прийнято.</b>\n\n"
-            "Якщо у вас є питання — зверніться до підтримки.\n\n"
+            "Ваше замовлення скасовано. Дякуємо, що звернулися до нас!\n\n"
             "Бажаєте зробити нове замовлення?",
             parse_mode="HTML",
             reply_markup=client_kb.as_markup(),
