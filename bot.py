@@ -2591,7 +2591,8 @@ async def edit_main_callback(call: CallbackQuery, state: FSMContext):
         return
 
     await call.answer()
-    await call.message.answer("Що бажаєте змінити?", reply_markup=get_edit_fields_keyboard())
+    edit_msg = await call.message.answer("Що бажаєте змінити?", reply_markup=get_edit_fields_keyboard())
+    await state.update_data(edit_menu_msg_id=edit_msg.message_id)
 
 
 @router.callback_query(lambda c: c.data == "edit_cancel")
@@ -2602,6 +2603,14 @@ async def edit_cancel_callback(call: CallbackQuery, state: FSMContext):
         return
 
     await call.answer()
+    data = await state.get_data()
+    edit_menu_msg_id = data.get("edit_menu_msg_id")
+    if edit_menu_msg_id:
+        try:
+            await bot.delete_message(call.message.chat.id, edit_menu_msg_id)
+        except Exception:
+            pass
+        await state.update_data(edit_menu_msg_id=None)
     await show_confirmation(call.message, state)
 
 
@@ -2614,7 +2623,14 @@ async def edit_field_callback(call: CallbackQuery, state: FSMContext):
 
     await call.answer()
     field = call.data
-    await state.update_data(edit_mode=True)
+    data = await state.get_data()
+    edit_menu_msg_id = data.get("edit_menu_msg_id")
+    if edit_menu_msg_id:
+        try:
+            await bot.delete_message(call.message.chat.id, edit_menu_msg_id)
+        except Exception:
+            pass
+    await state.update_data(edit_mode=True, edit_menu_msg_id=None)
 
     if field == "edit_customer_name":
         await state.set_state(Form.customer_name)
@@ -3055,6 +3071,17 @@ async def process_confirmation(message: Message, state: FSMContext):
         return
 
     if text == "❌ Скасувати":
+        data = await state.get_data()
+        summary_msg_id = data.get("summary_msg_id")
+        if summary_msg_id:
+            try:
+                await bot.edit_message_reply_markup(
+                    chat_id=message.chat.id,
+                    message_id=summary_msg_id,
+                    reply_markup=None,
+                )
+            except Exception:
+                pass
         await restore_commands(message.from_user.id)
         await message.answer(
             "❌ Заявку скасовано. Щоб створити нову заявку, натисніть /order",
