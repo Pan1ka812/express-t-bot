@@ -398,7 +398,7 @@ SHEETS_HEADERS = [
     "Адреса завантаження", "Адреса розвантаження",
     "Тел. завантаження", "Тел. розвантаження",
     "Платник", "Деталі платника", "Коментар",
-    "Статус", "Ціна", "Telegram ID", "Username",
+    "Статус", "Telegram ID", "Username",
     "Час відправки в групу", "Диспетчер", "Час відповіді диспетчера", "Причина відмови", "Час реагування",
 ]
 
@@ -651,7 +651,6 @@ def _write_order_to_sheets_sync(order_id: int, user: types.User, data: dict, pro
             data.get("payer_details") or "",
             data.get("comment") or "",
             ORDER_STATUS_CREATED,
-            "",
             user.id,
             f"@{user.username}" if user.username else "",
             now_str,  # Час відправки в групу
@@ -685,8 +684,6 @@ def _update_order_in_sheets_sync(
         row = cell.row
         if status is not None:
             sheet.update_cell(row, SHEETS_HEADERS.index("Статус") + 1, status)
-        if price is not None:
-            sheet.update_cell(row, SHEETS_HEADERS.index("Ціна") + 1, price)
         if dispatcher_username is not None:
             sheet.update_cell(row, SHEETS_HEADERS.index("Диспетчер") + 1, dispatcher_username)
         if responded_at is not None:
@@ -1223,13 +1220,21 @@ def get_main_edit_keyboard():
     return kb.as_markup()
 
 
-def get_edit_fields_keyboard():
+def get_edit_fields_keyboard(data: dict):
+    service_type = data.get("service_type", "")
+    cargo_name = data.get("cargo_name", "")
     kb = InlineKeyboardBuilder()
     kb.add(InlineKeyboardButton(text="👤 Як звертатися", callback_data="edit_customer_name"))
-    kb.add(InlineKeyboardButton(text="🚗 Марка/модель авто", callback_data="edit_car_brand_model"))
-    kb.add(InlineKeyboardButton(text="📦 Опис вантажу", callback_data="edit_custom_cargo_description"))
-    kb.add(InlineKeyboardButton(text="📏 Габарити", callback_data="edit_dimensions"))
-    kb.add(InlineKeyboardButton(text="⚖️ Вага", callback_data="edit_weight"))
+    # Марка/модель — тільки для авто (не "Інше")
+    if service_type in {"Евакуатор", "Гідравлічна платформа", "Кран-маніпулятор"} and cargo_name != "Інше":
+        kb.add(InlineKeyboardButton(text="🚗 Марка/модель авто", callback_data="edit_car_brand_model"))
+    # Опис вантажу — тільки якщо "Інше"
+    if cargo_name == "Інше":
+        kb.add(InlineKeyboardButton(text="📦 Опис вантажу", callback_data="edit_custom_cargo_description"))
+    # Габарити і вага — тільки якщо питались
+    if needs_dimensions(service_type, cargo_name):
+        kb.add(InlineKeyboardButton(text="📏 Габарити", callback_data="edit_dimensions"))
+        kb.add(InlineKeyboardButton(text="⚖️ Вага", callback_data="edit_weight"))
     kb.add(InlineKeyboardButton(text="⏰ Терміновість", callback_data="edit_urgency_type"))
     kb.add(InlineKeyboardButton(text="📍 Адреса завантаження", callback_data="edit_loading_address"))
     kb.add(InlineKeyboardButton(text="📍 Адреса розвантаження", callback_data="edit_unloading_address"))
@@ -2591,7 +2596,8 @@ async def edit_main_callback(call: CallbackQuery, state: FSMContext):
         return
 
     await call.answer()
-    edit_msg = await call.message.answer("Що бажаєте змінити?", reply_markup=get_edit_fields_keyboard())
+    data = await state.get_data()
+    edit_msg = await call.message.answer("Що бажаєте змінити?", reply_markup=get_edit_fields_keyboard(data))
     await state.update_data(edit_menu_msg_id=edit_msg.message_id)
 
 
