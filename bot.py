@@ -2991,10 +2991,9 @@ async def profile_support_callback(call: CallbackQuery):
     await replace_callback_message(
         call,
         "📞 <b>Контакти диспетчера:</b>\n\n"
-        "🏢 <code>(044) 333-33-33</code>\n"
-        "🟡 <code>(066) 583-33-33</code> — Lifecell\n"
-        "🟡 <code>(093) 583-33-33</code> — Lifecell\n"
-        "🔵 <code>(096) 583-33-33</code> — Kyivstar",
+        "<code>(044) 333-33-33</code> — Колбек\n"
+        "<code>(066) 583-33-33</code> — Lifecell\n"
+        "<code>(096) 583-33-33</code> — Kyivstar",
         reply_markup=get_profile_keyboard(),
         parse_mode="HTML",
     )
