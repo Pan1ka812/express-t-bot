@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Optional
 from brands_data import BRAND_ALIASES, GENERIC_VEHICLE_WORDS
 
+import aiohttp
 import asyncpg
 import gspread
 from google.oauth2.service_account import Credentials
@@ -1190,6 +1191,18 @@ def build_reply_keyboard(options: list[str], adjust: int = 2):
     return kb.as_markup(resize_keyboard=True)
 
 
+async def reverse_geocode(lat: float, lng: float) -> str:
+    try:
+        url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lng}&format=json&accept-language=uk"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers={"User-Agent": "TelegramBot/1.0"}, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                data = await resp.json()
+                address = data.get("display_name", "")
+                return clean_map_address(address) if address else f"геолокація ({lat:.5f}, {lng:.5f})"
+    except Exception:
+        return f"геолокація ({lat:.5f}, {lng:.5f})"
+
+
 def clean_map_address(address: str) -> str:
     address = re.sub(r",?\s*Україна\s*", "", address, flags=re.IGNORECASE)
     address = re.sub(r",?\s*\d{5}\s*", "", address)
@@ -1197,16 +1210,17 @@ def clean_map_address(address: str) -> str:
     return address.strip(", ").strip()
 
 
-def build_address_keyboard(mode: str):
+def build_address_keyboard(mode: str, show_location: bool = True):
     kb = ReplyKeyboardBuilder()
     kb.add(KeyboardButton(
         text="🗺️ Відкрити карту",
         web_app=WebAppInfo(url=f"{MAP_WEBAPP_URL}?mode={mode}"),
     ))
-    kb.add(KeyboardButton(
-        text="📍 Моє місцезнаходження",
-        request_location=True,
-    ))
+    if show_location:
+        kb.add(KeyboardButton(
+            text="📍 Моє місцезнаходження",
+            request_location=True,
+        ))
     kb.adjust(1)
     return kb.as_markup(resize_keyboard=True)
 
@@ -2095,7 +2109,7 @@ async def process_loading_address(message: Message, state: FSMContext):
     if message.location:
         lat = message.location.latitude
         lng = message.location.longitude
-        address = f"геолокація ({lat:.5f}, {lng:.5f})"
+        address = await reverse_geocode(lat, lng)
         await state.update_data(loading_address=address, loading_lat=lat, loading_lng=lng)
         data = await state.get_data()
         if data.get("edit_mode"):
@@ -2103,9 +2117,10 @@ async def process_loading_address(message: Message, state: FSMContext):
             await show_confirmation(message, state)
             return
         await message.answer(
-            f"✅ Місцезнаходження збережено.\n\n"
-            "🗺️ Тепер вкажіть адресу розвантаження.\nВідкрийте карту, надішліть геолокацію або введіть адресу текстом.",
-            reply_markup=build_address_keyboard("unloading"),
+            f"✅ Адресу завантаження збережено:\n<b>{html.escape(address)}</b>\n\n"
+            "🗺️ Тепер вкажіть адресу розвантаження.\nВідкрийте карту або введіть адресу текстом.",
+            reply_markup=build_address_keyboard("unloading", show_location=False),
+            parse_mode="HTML",
         )
         await state.set_state(Form.unloading_address)
         return
@@ -2173,7 +2188,7 @@ async def process_unloading_address(message: Message, state: FSMContext):
     if message.location:
         lat = message.location.latitude
         lng = message.location.longitude
-        address = f"геолокація ({lat:.5f}, {lng:.5f})"
+        address = await reverse_geocode(lat, lng)
         await state.update_data(unloading_address=address, unloading_lat=lat, unloading_lng=lng)
         data = await state.get_data()
         if data.get("edit_mode"):
