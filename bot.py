@@ -79,6 +79,7 @@ URGENCY_TYPES = [
 
 PAYER_TYPES = [
     "Готівка",
+    "Картка",
     "БН",
 ]
 
@@ -1202,6 +1203,10 @@ def build_address_keyboard(mode: str):
         text="🗺️ Відкрити карту",
         web_app=WebAppInfo(url=f"{MAP_WEBAPP_URL}?mode={mode}"),
     ))
+    kb.add(KeyboardButton(
+        text="📍 Моє місцезнаходження",
+        request_location=True,
+    ))
     kb.adjust(1)
     return kb.as_markup(resize_keyboard=True)
 
@@ -2086,12 +2091,33 @@ async def process_loading_address(message: Message, state: FSMContext):
         await state.set_state(Form.unloading_address)
         return
 
+    # Геолокація
+    if message.location:
+        lat = message.location.latitude
+        lng = message.location.longitude
+        address = f"геолокація ({lat:.5f}, {lng:.5f})"
+        await state.update_data(loading_address=address, loading_lat=lat, loading_lng=lng)
+        data = await state.get_data()
+        if data.get("edit_mode"):
+            await state.update_data(edit_mode=False)
+            await show_confirmation(message, state)
+            return
+        await message.answer(
+            f"✅ Місцезнаходження збережено.\n\n"
+            "🗺️ Тепер вкажіть адресу розвантаження.\nВідкрийте карту, надішліть геолокацію або введіть адресу текстом.",
+            reply_markup=build_address_keyboard("unloading"),
+        )
+        await state.set_state(Form.unloading_address)
+        return
+
     # Ручний ввід тексту
     text = (message.text or "").strip()
     if not is_valid_address(text):
         await message.answer(
             "Будь ласка, введіть повну адресу завантаження.\n"
-            "Наприклад: Київ, вул. Бориспільська, 12"
+            "Наприклад: Київ, вул. Бориспільська, 12\n\n"
+            "Або скористайтеся картою чи геолокацією:",
+            reply_markup=build_address_keyboard("loading"),
         )
         return
 
@@ -2143,12 +2169,32 @@ async def process_unloading_address(message: Message, state: FSMContext):
         await state.set_state(Form.additional_phones)
         return
 
+    # Геолокація
+    if message.location:
+        lat = message.location.latitude
+        lng = message.location.longitude
+        address = f"геолокація ({lat:.5f}, {lng:.5f})"
+        await state.update_data(unloading_address=address, unloading_lat=lat, unloading_lng=lng)
+        data = await state.get_data()
+        if data.get("edit_mode"):
+            await state.update_data(edit_mode=False)
+            await show_confirmation(message, state)
+            return
+        await message.answer(
+            "Чи потрібні додаткові номери на завантаження або вивантаження?",
+            reply_markup=build_reply_keyboard(["✅ Так", "❌ Ні"]),
+        )
+        await state.set_state(Form.additional_phones)
+        return
+
     # Ручний ввід тексту
     text = (message.text or "").strip()
     if not is_valid_address(text):
         await message.answer(
             "Будь ласка, введіть повну адресу розвантаження.\n"
-            "Наприклад: Київ, вул. Січових Стрільців, 18"
+            "Наприклад: Київ, вул. Січових Стрільців, 18\n\n"
+            "Або скористайтеся картою чи геолокацією:",
+            reply_markup=build_address_keyboard("unloading"),
         )
         return
 
@@ -2470,8 +2516,8 @@ async def process_payer_type(message: Message, state: FSMContext):
 
     text = message.text or ""
 
-    if text == "Готівка":
-        await state.update_data(payer_type="Готівка", payer_details="-")
+    if text in {"Готівка", "Картка"}:
+        await state.update_data(payer_type=text, payer_details="-")
         await show_confirmation(message, state)
         return
 
