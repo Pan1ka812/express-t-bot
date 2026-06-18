@@ -3297,6 +3297,23 @@ async def disp_reason_callback(call: CallbackQuery):
     except Exception:
         pass
 
+    client_kb = InlineKeyboardBuilder()
+    client_kb.add(InlineKeyboardButton(text="🚀 Нове замовлення", callback_data="profile_new_order"))
+    client_kb.add(InlineKeyboardButton(text="👤 Мій профіль", callback_data="client_go_profile"))
+    client_kb.adjust(1)
+
+    try:
+        await bot.send_message(
+            client_id,
+            "❌ <b>На жаль, ваше замовлення не було прийнято.</b>\n\n"
+            "Якщо у вас є питання — зверніться до підтримки.\n\n"
+            "Бажаєте зробити нове замовлення?",
+            parse_mode="HTML",
+            reply_markup=client_kb.as_markup(),
+        )
+    except Exception:
+        logging.warning("Could not notify client %s about rejected order %s", client_id, order_id)
+
 
 @router.callback_query(lambda c: c.data == "client_go_profile")
 async def client_go_profile_callback(call: CallbackQuery):
