@@ -1035,6 +1035,11 @@ def is_valid_address(address: str) -> bool:
     if len(parts) == 1 and not has_digit:
         return False
 
+    # Відхиляємо якщо немає жодного слова з літер (лише цифри/пробіли)
+    has_word = bool(re.search(r"[A-Za-zА-Яа-яІіЇїЄє]{2,}", text))
+    if not has_word:
+        return False
+
     return True
 
 
