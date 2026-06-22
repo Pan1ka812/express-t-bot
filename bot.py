@@ -2568,7 +2568,7 @@ async def process_payer_details(message: Message, state: FSMContext):
         return
 
     digit_sequences = re.findall(r"\d+", text)
-    valid_code = any(len(d) in (8, 11) for d in digit_sequences)
+    valid_code = any(len(d) in (8, 10) for d in digit_sequences)
     if not valid_code:
         await message.answer(
             "❌ Не знайдено коректний код ЄДРПОУ або ІНН.\n\n"
@@ -3314,7 +3314,7 @@ async def disp_reason_callback(call: CallbackQuery):
     try:
         await bot.send_message(
             client_id,
-            "Ваше замовлення скасовано. Дякуємо, що звернулися до нас!\n\n"
+            "Замовлення скасовано. Будемо раді допомогти наступного разу!\n\n"
             "Бажаєте зробити нове замовлення?",
             parse_mode="HTML",
             reply_markup=client_kb.as_markup(),
