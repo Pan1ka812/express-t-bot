@@ -2651,7 +2651,7 @@ async def process_photo(message: Message, state: FSMContext):
     if text == "🗑 Очистити фото":
         await state.update_data(photo_file_ids=[])
         await message.answer(
-            "Фото видалено. Надішліть нове фото або натисніть «Пропустити».",
+            "Фото видалено. Надішліть нове фото.",
             reply_markup=ReplyKeyboardRemove(),
         )
         return
