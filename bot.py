@@ -2992,6 +2992,11 @@ async def profile_new_order_callback(call: CallbackQuery, state: FSMContext):
     await call.answer()
     await state.clear()
     await hide_commands(call.from_user.id)
+    try:
+        await call.message.delete()
+        _user_last_kb_msg.pop(call.message.chat.id, None)
+    except Exception:
+        pass
     await call.message.answer(
         "Як до вас звертатися?\nНаприклад: Андрій",
         reply_markup=ReplyKeyboardRemove(),
@@ -3012,9 +3017,9 @@ async def profile_support_callback(call: CallbackQuery):
         call,
         "📞 <b>Підтримка Express T</b>\n\n"
         "Зв'яжіться з диспетчером будь-яким зручним способом:\n\n"
-        "📱 <code>333</code>\n"
-        "📱 <code>(066) 583-33-33</code>  <i>Lifecell</i>\n"
-        "📱 <code>(096) 583-33-33</code>  <i>Kyivstar</i>",
+        "📱 <a href=\"tel:333\">333</a>\n"
+        "📱 <a href=\"tel:+380665833333\">(066) 583-33-33</a>  <i>Lifecell</i>\n"
+        "📱 <a href=\"tel:+380965833333\">(096) 583-33-33</a>  <i>Kyivstar</i>",
         reply_markup=get_profile_keyboard(),
         parse_mode="HTML",
     )
