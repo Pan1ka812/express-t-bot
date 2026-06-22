@@ -1232,10 +1232,13 @@ async def reverse_geocode(lat: float, lng: float) -> str:
                 road = addr.get("road") or addr.get("pedestrian") or addr.get("path") or ""
                 house = addr.get("house_number", "")
                 suburb = addr.get("suburb") or addr.get("neighbourhood") or addr.get("city_district") or ""
+                city = addr.get("city") or addr.get("town") or addr.get("village") or ""
                 if road:
                     parts.append(f"{road}, {house}".strip(", ") if house else road)
                 if suburb:
                     parts.append(suburb)
+                if city:
+                    parts.append(city)
                 return ", ".join(parts) if parts else f"геолокація ({lat:.5f}, {lng:.5f})"
     except Exception:
         return f"геолокація ({lat:.5f}, {lng:.5f})"
@@ -1244,7 +1247,7 @@ async def reverse_geocode(lat: float, lng: float) -> str:
 def clean_map_address(address: str) -> str:
     # Remove country, postal code, known noise
     noise = re.compile(
-        r",?\s*(Україна|Ukraine|Київ|Kyiv|\d{5}|[А-ЯA-Z][а-яa-z]+ський район|[А-ЯA-Z][а-яa-z]+ська міська громада)\s*",
+        r",?\s*(Україна|Ukraine|\d{5}|[А-ЯA-Z][а-яa-z]+ський район|[А-ЯA-Z][а-яa-z]+ська міська громада)\s*",
         re.IGNORECASE,
     )
     address = noise.sub("", address)
