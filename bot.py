@@ -35,12 +35,12 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 # =========================
 # CONFIG
 # =========================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "7394588586:AAF6pqDYoCg7ZkesVT1YbAfiQ_3Cc9ZonTU")
-ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "-4962711861"))
-REVIEWS_CHAT_ID = int(os.getenv("REVIEWS_CHAT_ID", "-5169948092"))
-SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "+380632354243")
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:fQNrjOfoMjJjOfJSWcuLOzyMQmGlCgJU@postgres.railway.internal:5432/railway")
-GOOGLE_SPREADSHEET_ID = os.getenv("GOOGLE_SPREADSHEET_ID", "1-R4O8AbJ1lwmF-jdBOFMx7nmAOfb_b0Sblhysp0_qGU")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
+REVIEWS_CHAT_ID = int(os.getenv("REVIEWS_CHAT_ID", "0"))
+SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "")
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+GOOGLE_SPREADSHEET_ID = os.getenv("GOOGLE_SPREADSHEET_ID", "")
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS", "")
 
 BASE_DIR = Path(__file__).resolve().parent
