@@ -3166,7 +3166,7 @@ async def process_confirmation(message: Message, state: FSMContext):
         ))
         disp_kb.adjust(1)
 
-        await bot.send_message(
+        order_msg = await bot.send_message(
             ADMIN_CHAT_ID,
             admin_text,
             parse_mode="HTML",
@@ -3180,7 +3180,7 @@ async def process_confirmation(message: Message, state: FSMContext):
                 from aiogram.types import InputMediaPhoto
                 media = [InputMediaPhoto(media=fid) for fid in photo_ids]
                 media[0] = InputMediaPhoto(media=photo_ids[0], caption=f"📷 Фото до заявки #{order_id}")
-                await bot.send_media_group(ADMIN_CHAT_ID, media=media)
+                await bot.send_media_group(ADMIN_CHAT_ID, media=media, reply_to_message_id=order_msg.message_id)
             except Exception:
                 logging.warning("Failed to send photos for order %s", order_id)
 
