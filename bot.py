@@ -1552,10 +1552,15 @@ async def cmd_start(message: Message, state: FSMContext):
         "✅ Надійність\n"
         "✅ Оперативність\n"
         "✅ Індивідуальний підхід\n\n"
-        "ℹ️ Для інструкції натисніть /help\n"
-        "👤 Профіль: /profile\n"
-        "🚀 Щоб зробити замовлення, натисніть /order"
+        "Оберіть дію нижче 👇"
     )
+
+    kb = ReplyKeyboardBuilder()
+    kb.add(KeyboardButton(text="🚀 Нове замовлення"))
+    kb.add(KeyboardButton(text="👤 Мій профіль"))
+    kb.add(KeyboardButton(text="❓ Допомога"))
+    kb.adjust(2)
+    start_kb = kb.as_markup(resize_keyboard=True)
 
     try:
         if photo_path.exists():
@@ -1563,11 +1568,22 @@ async def cmd_start(message: Message, state: FSMContext):
                 FSInputFile(str(photo_path)),
                 caption=caption_text,
                 parse_mode="HTML",
+                reply_markup=start_kb,
             )
         else:
-            await message.answer(caption_text, parse_mode="HTML")
+            await message.answer(caption_text, parse_mode="HTML", reply_markup=start_kb)
     except Exception:
-        await message.answer(caption_text, parse_mode="HTML")
+        await message.answer(caption_text, parse_mode="HTML", reply_markup=start_kb)
+
+
+@router.message(lambda m: m.text in ("🚀 Нове замовлення", "👤 Мій профіль", "❓ Допомога"))
+async def start_menu_buttons(message: Message, state: FSMContext):
+    if message.text == "🚀 Нове замовлення":
+        await cmd_order(message, state)
+    elif message.text == "👤 Мій профіль":
+        await cmd_profile(message, state)
+    elif message.text == "❓ Допомога":
+        await help_command(message)
 
 
 @router.message(Command("help"))
