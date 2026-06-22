@@ -491,7 +491,7 @@ def _setup_sheets_sync():
     if client is None:
         return
     try:
-        spreadsheet = client.open_by_key(GOOGLE_SPREADSHEET_ID)
+        spreadsheet = client.open_by_key(os.getenv("GOOGLE_SPREADSHEET_ID", ""))
         sheet = spreadsheet.sheet1
         try:
             first_row = sheet.row_values(1)
@@ -530,7 +530,7 @@ def _setup_price_sheet_sync():
     if client is None:
         return
     try:
-        spreadsheet = client.open_by_key(GOOGLE_SPREADSHEET_ID)
+        spreadsheet = client.open_by_key(os.getenv("GOOGLE_SPREADSHEET_ID", ""))
         try:
             ws = spreadsheet.worksheet(PRICE_SHEET_NAME)
         except Exception:
@@ -584,7 +584,7 @@ def _read_prices_sync(service_type: str, car_type: str):
     if client is None:
         return None, None
     try:
-        spreadsheet = client.open_by_key(GOOGLE_SPREADSHEET_ID)
+        spreadsheet = client.open_by_key(os.getenv("GOOGLE_SPREADSHEET_ID", ""))
         ws = spreadsheet.worksheet(PRICE_SHEET_NAME)
         all_vals = ws.get_all_values()
         if not all_vals:
@@ -628,7 +628,7 @@ def _write_order_to_sheets_sync(order_id: int, user: types.User, data: dict, pro
     if client is None:
         return
     try:
-        sheet = client.open_by_key(GOOGLE_SPREADSHEET_ID).sheet1
+        sheet = client.open_by_key(os.getenv("GOOGLE_SPREADSHEET_ID", "")).sheet1
         cargo_label = data.get("cargo_name") or ""
         if data.get("cargo_name") == "Інше" and data.get("custom_cargo_description"):
             cargo_label = f"Інше ({data.get('custom_cargo_description')})"
@@ -679,7 +679,7 @@ def _update_order_in_sheets_sync(
     if client is None:
         return
     try:
-        sheet = client.open_by_key(GOOGLE_SPREADSHEET_ID).sheet1
+        sheet = client.open_by_key(os.getenv("GOOGLE_SPREADSHEET_ID", "")).sheet1
         try:
             cell = sheet.find(str(order_id), in_column=1)
         except Exception:
