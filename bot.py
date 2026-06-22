@@ -1,4 +1,3 @@
-# основні пітонівські штуки без яких нічого не працює
 import asyncio
 import html
 import json
@@ -10,18 +9,14 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
-
-# свій файл з базою марок машин, довго збирав
 from brands_data import BRAND_ALIASES, GENERIC_VEHICLE_WORDS
 
-# зовнішні бібліотеки — треба pip install або requirements.txt
-import aiohttp          # для геолокації (reverse geocoding через nominatim)
-import asyncpg          # підключення до postgres, без цього база не працює
-import gspread          # гугл таблиці
-from google.oauth2.service_account import Credentials  # авторизація в гугл
+import aiohttp
+import asyncpg
+import gspread
+from google.oauth2.service_account import Credentials
 
-# aiogram — основний фреймворк для телеграм бота
-from aiogram import BaseMiddleware, Bot, Dispatcher, Router, types
+from aiogram import Bot, Dispatcher, Router, types
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -40,14 +35,13 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 # =========================
 # CONFIG
 # =========================
-# всі секрети беруться зі змінних оточення (Railway Variables), в коді нічого не зберігаю
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))        # id групи диспетчерів
-REVIEWS_CHAT_ID = int(os.getenv("REVIEWS_CHAT_ID", "0"))    # id групи відгуків (поки не використовується)
+ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
+REVIEWS_CHAT_ID = int(os.getenv("REVIEWS_CHAT_ID", "0"))
 SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 GOOGLE_SPREADSHEET_ID = os.getenv("GOOGLE_SPREADSHEET_ID", "")
-GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS", "")  # json ключ сервісного акаунту гугл
+GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS", "")
 
 BASE_DIR = Path(__file__).resolve().parent
 BANNED_USERS_FILE = BASE_DIR / "banned_users.json"
@@ -59,29 +53,6 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
-
-
-# middleware який перехоплює всі повідомлення і перевіряє:
-# 1. чи це приватний чат (бот працює тільки в приваті)
-# 2. чи не заблокований юзер
-# без цього треба було б писати перевірку в кожному хендлері окремо — так чистіше
-class PrivateBanMiddleware(BaseMiddleware):
-    async def __call__(self, handler, event, data):
-        if isinstance(event, types.Message):
-            if event.chat.type != "private":
-                return
-            user = event.from_user
-            if user and is_user_banned(user.id):
-                await event.answer("❌ Доступ до бота обмежено.\nЗверніться до оператора.")
-                return
-        elif isinstance(event, types.CallbackQuery):
-            if event.message.chat.type != "private":
-                return
-            user = event.from_user
-            if user and is_user_banned(user.id):
-                await event.answer("Доступ до бота обмежено.", show_alert=True)
-                return
-        return await handler(event, data)
 
 # =========================
 # CONSTANTS
@@ -146,11 +117,8 @@ MANUAL_PHONE_INPUT_TEXT = "✍️ Ввести інший номер вручн�
 PAGE_SIZE = 5
 
 # =========================
-# FSM — стани замовлення
+# FSM
 # =========================
-# FSM (машина станів) — це як сценарій розмови з клієнтом.
-# кожен State() це один крок в діалозі. бот запам'ятовує на якому кроці юзер
-# і чекає саме ту відповідь яку треба на цьому кроці
 class Form(StatesGroup):
     service_type = State()
     cargo_name = State()
@@ -184,9 +152,6 @@ class Form(StatesGroup):
 # =========================
 # DATABASE (asyncpg / PostgreSQL)
 # =========================
-# підключення до бази даних через пул з'єднань.
-# пул це коли відкриваємо кілька з'єднань одразу щоб не відкривати нове кожен раз —
-# так набагато швидше і не падає під навантаженням
 _db_pool: Optional[asyncpg.Pool] = None
 
 
@@ -234,6 +199,17 @@ async def init_db():
             created_at TEXT
         )
         """)
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS reviews (
+            id SERIAL PRIMARY KEY,
+            order_id INTEGER NOT NULL UNIQUE,
+            telegram_id BIGINT NOT NULL,
+            stars INTEGER NOT NULL,
+            reason TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """)
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_reviews_telegram_id ON reviews(telegram_id)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_telegram_id ON orders(telegram_id)")
         await conn.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS dispatcher_username TEXT")
         await conn.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS responded_at TEXT")
@@ -539,7 +515,7 @@ def _setup_sheets_sync():
 
 
 async def setup_sheets():
-    loop = asyncio.get_running_loop()
+    loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, _setup_sheets_sync)
 
 
@@ -597,7 +573,7 @@ def _setup_price_sheet_sync():
 
 
 async def setup_price_sheet():
-    loop = asyncio.get_running_loop()
+    loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, _setup_price_sheet_sync)
 
 
@@ -642,7 +618,7 @@ def _read_prices_sync(service_type: str, car_type: str):
 
 
 async def read_prices(service_type: str, car_type: str):
-    loop = asyncio.get_running_loop()
+    loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, _read_prices_sync, service_type, car_type)
 
 
@@ -723,7 +699,7 @@ def _update_order_in_sheets_sync(
 
 
 async def write_order_to_sheets(order_id: int, user: types.User, data: dict, profile: Optional[dict]):
-    loop = asyncio.get_running_loop()
+    loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, _write_order_to_sheets_sync, order_id, user, data, profile)
 
 
@@ -736,7 +712,7 @@ async def update_order_in_sheets(
     decline_reason: Optional[str] = None,
     response_time: Optional[str] = None,
 ):
-    loop = asyncio.get_running_loop()
+    loop = asyncio.get_event_loop()
     await loop.run_in_executor(
         None,
         lambda: _update_order_in_sheets_sync(order_id, status, price, dispatcher_username, responded_at, decline_reason, response_time),
@@ -778,11 +754,46 @@ def is_user_banned(user_id: int) -> bool:
     return user_id in _banned_users_cache
 
 
+async def deny_if_banned_message(message: Message) -> bool:
+    user = message.from_user
+    if user and is_user_banned(user.id):
+        await message.answer("❌ Доступ до бота обмежено.\nЗверніться до оператора.")
+        return True
+    return False
+
+
+async def deny_if_banned_callback(call: CallbackQuery) -> bool:
+    user = call.from_user
+    if user and is_user_banned(user.id):
+        await call.answer("Доступ до бота обмежено.", show_alert=True)
+        try:
+            await call.message.answer("❌ Доступ до бота обмежено.\nЗверніться до оператора.")
+        except Exception:
+            pass
+        return True
+    return False
+
 # =========================
 # CHAT HELPERS
 # =========================
+def is_private_chat_message(message: Message) -> bool:
+    return message.chat.type == "private"
+
+
+def is_private_chat_callback(call: CallbackQuery) -> bool:
+    return call.message.chat.type == "private"
+
+
 def is_admin_chat_message(message: Message) -> bool:
     return message.chat.id == ADMIN_CHAT_ID
+
+
+async def deny_if_not_private_message(message: Message) -> bool:
+    return not is_private_chat_message(message)
+
+
+async def deny_if_not_private_callback(call: CallbackQuery) -> bool:
+    return not is_private_chat_callback(call)
 async def replace_callback_message(
     call: CallbackQuery,
     text: str,
@@ -1514,6 +1525,10 @@ async def send_profile_to_chat(chat_id: int, telegram_id: int):
 # =========================
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
 
     await state.clear()
 
@@ -1556,6 +1571,10 @@ async def cmd_start(message: Message, state: FSMContext):
 
 @router.message(Command("help"))
 async def help_command(message: Message):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
 
     help_text = (
         "<b>Як зробити замовлення через Express T?</b>\n\n"
@@ -1578,6 +1597,10 @@ async def help_command(message: Message):
 
 @router.message(Command("profile"))
 async def profile_command(message: Message):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
 
     user = message.from_user
     if user is None:
@@ -1593,6 +1616,10 @@ async def profile_command(message: Message):
 
 @router.message(Command("order"))
 async def cmd_order(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
 
     await state.clear()
     await hide_commands(message.from_user.id)
@@ -1664,7 +1691,7 @@ async def clearall_command(message: Message):
     async with _db_pool.acquire() as conn:
         await conn.execute("DELETE FROM orders")
         await conn.execute("DELETE FROM users")
-    loop = asyncio.get_running_loop()
+    loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, _setup_sheets_sync)
     await message.answer("✅ Всі замовлення та користувачі видалені. Таблиця очищена.")
 
@@ -1709,6 +1736,10 @@ async def setnote_command(message: Message):
 # =========================
 @router.message(Form.service_type)
 async def process_service_type(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
 
     text = message.text or ""
     if text not in SERVICE_TYPES:
@@ -1730,6 +1761,10 @@ async def process_service_type(message: Message, state: FSMContext):
 
 @router.message(Form.cargo_name)
 async def process_cargo_name(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
 
     text = (message.text or "").strip()
     data = await state.get_data()
@@ -1774,6 +1809,10 @@ async def process_cargo_name(message: Message, state: FSMContext):
 
 @router.message(Form.custom_cargo_description)
 async def process_custom_cargo_description(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
 
     text = (message.text or "").strip()
     if len(text) < 3:
@@ -1800,6 +1839,10 @@ async def process_custom_cargo_description(message: Message, state: FSMContext):
 
 @router.message(Form.car_brand_model)
 async def process_car_brand_model(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
 
     text = (message.text or "").strip()
     if not is_valid_car_brand_model(text):
@@ -1834,6 +1877,10 @@ async def process_car_brand_model(message: Message, state: FSMContext):
 
 @router.message(Form.dimensions)
 async def process_dimensions(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
 
     text = (message.text or "").strip()
     normalized = normalize_dimensions(text)
@@ -1868,6 +1915,10 @@ async def process_dimensions(message: Message, state: FSMContext):
 
 @router.message(Form.oversize_support)
 async def process_oversize_support(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
 
     text = message.text or ""
 
@@ -1892,6 +1943,10 @@ async def process_oversize_support(message: Message, state: FSMContext):
 
 @router.message(Form.weight)
 async def process_weight(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
 
     text = (message.text or "").strip()
     weight = parse_weight(text)
@@ -1916,6 +1971,10 @@ async def process_weight(message: Message, state: FSMContext):
 
 @router.message(Form.urgency_type)
 async def process_urgency_type(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
 
     text = message.text or ""
     if text not in URGENCY_TYPES:
@@ -1960,6 +2019,10 @@ async def process_urgency_type(message: Message, state: FSMContext):
 
 @router.message(Form.scheduled_date)
 async def process_scheduled_date(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
 
     text = (message.text or "").strip()
 
@@ -1979,6 +2042,10 @@ async def process_scheduled_date(message: Message, state: FSMContext):
 
 @router.message(Form.scheduled_time)
 async def process_scheduled_time(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
 
     text = re.sub(r"[.·\-]", ":", (message.text or "").strip())
 
@@ -2010,6 +2077,10 @@ async def process_scheduled_time(message: Message, state: FSMContext):
 
 @router.message(Form.loading_address)
 async def process_loading_address(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
 
     # Данные с карты
     if message.web_app_data is not None:
@@ -2087,6 +2158,10 @@ async def process_loading_address(message: Message, state: FSMContext):
 
 @router.message(Form.unloading_address)
 async def process_unloading_address(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
 
     # Данные с карты
     if message.web_app_data is not None:
@@ -2160,6 +2235,10 @@ async def process_unloading_address(message: Message, state: FSMContext):
 
 @router.message(Form.client_phone_input_choice)
 async def process_client_phone_input_choice(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
 
     if message.contact:
         contact = message.contact
@@ -2205,6 +2284,10 @@ async def process_client_phone_input_choice(message: Message, state: FSMContext)
 
 @router.message(Form.client_phone)
 async def process_client_phone(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
 
     phone = normalize_phone(message.text or "")
     if not phone:
@@ -2220,6 +2303,10 @@ async def process_client_phone(message: Message, state: FSMContext):
 
 @router.message(Form.customer_name)
 async def process_customer_name(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
 
     text = (message.text or "").strip()
     if not is_valid_customer_name(text):
@@ -2243,6 +2330,10 @@ async def process_customer_name(message: Message, state: FSMContext):
 
 @router.message(Form.additional_phones)
 async def process_additional_phones(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
 
     text = message.text or ""
     data = await state.get_data()
@@ -2270,6 +2361,10 @@ async def process_additional_phones(message: Message, state: FSMContext):
 
 @router.message(Form.loading_phone_choice)
 async def process_loading_phone_choice(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
 
     text = message.text or ""
     data = await state.get_data()
@@ -2302,6 +2397,10 @@ async def process_loading_phone_choice(message: Message, state: FSMContext):
 
 @router.message(Form.loading_phone)
 async def process_loading_phone(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
 
     phone = normalize_phone(message.text or "")
     if not phone:
@@ -2327,6 +2426,10 @@ async def process_loading_phone(message: Message, state: FSMContext):
 
 @router.message(Form.unloading_phone_choice)
 async def process_unloading_phone_choice(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
 
     text = message.text or ""
     data = await state.get_data()
@@ -2374,6 +2477,10 @@ async def process_unloading_phone_choice(message: Message, state: FSMContext):
 
 @router.message(Form.unloading_phone)
 async def process_unloading_phone(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
 
     phone = normalize_phone(message.text or "")
     if not phone:
@@ -2422,6 +2529,10 @@ async def ask_for_payer_with_price(message: Message, state: FSMContext):
 
 @router.message(Form.payer_type)
 async def process_payer_type(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
 
     text = message.text or ""
 
@@ -2445,6 +2556,10 @@ async def process_payer_type(message: Message, state: FSMContext):
 
 @router.message(Form.payer_details)
 async def process_payer_details(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
 
     text = (message.text or "").strip()
     if len(text) < 3:
@@ -2468,6 +2583,10 @@ async def process_payer_details(message: Message, state: FSMContext):
 
 @router.message(Form.comment_choice)
 async def process_comment_choice(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
 
     text = message.text or ""
 
@@ -2500,6 +2619,10 @@ async def process_comment_choice(message: Message, state: FSMContext):
 
 @router.message(Form.photo)
 async def process_photo(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
 
     if not message.photo:
         await message.answer("Будь ласка, надішліть саме фото.")
@@ -2512,6 +2635,10 @@ async def process_photo(message: Message, state: FSMContext):
 
 @router.message(Form.comment)
 async def process_comment(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
 
     text = (message.text or "").strip()
 
@@ -2530,6 +2657,10 @@ async def process_comment(message: Message, state: FSMContext):
 # =========================
 @router.callback_query(lambda c: c.data == "edit_main")
 async def edit_main_callback(call: CallbackQuery, state: FSMContext):
+    if await deny_if_not_private_callback(call):
+        return
+    if await deny_if_banned_callback(call):
+        return
 
     await call.answer()
     data = await state.get_data()
@@ -2539,6 +2670,10 @@ async def edit_main_callback(call: CallbackQuery, state: FSMContext):
 
 @router.callback_query(lambda c: c.data == "edit_cancel")
 async def edit_cancel_callback(call: CallbackQuery, state: FSMContext):
+    if await deny_if_not_private_callback(call):
+        return
+    if await deny_if_banned_callback(call):
+        return
 
     await call.answer()
     data = await state.get_data()
@@ -2554,6 +2689,10 @@ async def edit_cancel_callback(call: CallbackQuery, state: FSMContext):
 
 @router.callback_query(lambda c: c.data.startswith("edit_") and c.data not in {"edit_main", "edit_cancel"})
 async def edit_field_callback(call: CallbackQuery, state: FSMContext):
+    if await deny_if_not_private_callback(call):
+        return
+    if await deny_if_banned_callback(call):
+        return
 
     await call.answer()
     field = call.data
@@ -2741,12 +2880,18 @@ async def _show_orders_page(call: CallbackQuery, state: FSMContext, offset: int)
 
 @router.callback_query(lambda c: c.data == "profile_orders")
 async def profile_orders_callback(call: CallbackQuery, state: FSMContext):
+    if await deny_if_not_private_callback(call):
+        return
+    if await deny_if_banned_callback(call):
+        return
     await call.answer()
     await _show_orders_page(call, state, offset=0)
 
 
 @router.message(Form.history_browse, lambda m: m.text in ("◀️", "▶️", "👤 Профіль"))
 async def history_nav_message(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
 
     try:
         await message.delete()
@@ -2773,6 +2918,10 @@ async def history_nav_message(message: Message, state: FSMContext):
 
 @router.callback_query(lambda c: c.data.startswith("repeat_order:"))
 async def repeat_order_callback(call: CallbackQuery, state: FSMContext):
+    if await deny_if_not_private_callback(call):
+        return
+    if await deny_if_banned_callback(call):
+        return
 
     user = call.from_user
     if user is None:
@@ -2820,6 +2969,10 @@ async def repeat_order_callback(call: CallbackQuery, state: FSMContext):
 
 @router.callback_query(lambda c: c.data == "profile_new_order")
 async def profile_new_order_callback(call: CallbackQuery, state: FSMContext):
+    if await deny_if_not_private_callback(call):
+        return
+    if await deny_if_banned_callback(call):
+        return
 
     await call.answer()
     await state.clear()
@@ -2833,6 +2986,10 @@ async def profile_new_order_callback(call: CallbackQuery, state: FSMContext):
 
 @router.callback_query(lambda c: c.data == "profile_support")
 async def profile_support_callback(call: CallbackQuery):
+    if await deny_if_not_private_callback(call):
+        return
+    if await deny_if_banned_callback(call):
+        return
 
     await call.answer()
 
@@ -2847,6 +3004,10 @@ async def profile_support_callback(call: CallbackQuery):
     )
 @router.callback_query(lambda c: c.data == "history_close")
 async def history_close_callback(call: CallbackQuery):
+    if await deny_if_not_private_callback(call):
+        return
+    if await deny_if_banned_callback(call):
+        return
 
     await call.answer()
 
@@ -2858,6 +3019,10 @@ async def history_close_callback(call: CallbackQuery):
 
 @router.callback_query(lambda c: c.data == "history_back_to_profile")
 async def history_back_to_profile_callback(call: CallbackQuery, state: FSMContext):
+    if await deny_if_not_private_callback(call):
+        return
+    if await deny_if_banned_callback(call):
+        return
 
     await call.answer()
     chat_id = call.message.chat.id
@@ -2901,6 +3066,10 @@ async def show_confirmation(message: Message, state: FSMContext):
 
 @router.message(Form.confirmation)
 async def process_confirmation(message: Message, state: FSMContext):
+    if await deny_if_not_private_message(message):
+        return
+    if await deny_if_banned_message(message):
+        return
 
     text = message.text or ""
 
@@ -3155,6 +3324,8 @@ async def disp_reason_callback(call: CallbackQuery):
 
 @router.callback_query(lambda c: c.data == "client_go_profile")
 async def client_go_profile_callback(call: CallbackQuery):
+    if await deny_if_not_private_callback(call):
+        return
     await call.answer()
     user = call.from_user
     if user is None:
@@ -3176,8 +3347,6 @@ if __name__ == "__main__":
         await init_db()
         await setup_sheets()
         await setup_price_sheet()
-        router.message.middleware(PrivateBanMiddleware())
-        router.callback_query.middleware(PrivateBanMiddleware())
         await bot.delete_webhook(drop_pending_updates=True)
         await bot.set_my_commands(BOT_COMMANDS)
         print("Бот запущено...")
