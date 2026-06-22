@@ -409,11 +409,13 @@ _sheets_client: Optional[gspread.Client] = None
 
 def _get_sheets_client() -> Optional[gspread.Client]:
     global _sheets_client
-    if not GOOGLE_CREDENTIALS_JSON:
+    credentials_json = os.getenv("GOOGLE_CREDENTIALS", "")
+    if not credentials_json:
+        logging.warning("GOOGLE_CREDENTIALS env var is empty")
         return None
     if _sheets_client is None:
         try:
-            creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
+            creds_dict = json.loads(credentials_json)
             scopes = [
                 "https://spreadsheets.google.com/feeds",
                 "https://www.googleapis.com/auth/drive",
