@@ -1227,43 +1227,17 @@ async def reverse_geocode(lat: float, lng: float) -> str:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers={"User-Agent": "TelegramBot/1.0"}, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                 data = await resp.json()
-                addr = data.get("address", {})
-                parts = []
-                road = addr.get("road") or addr.get("pedestrian") or addr.get("path") or ""
-                house = addr.get("house_number", "")
-                suburb = addr.get("suburb") or addr.get("neighbourhood") or addr.get("city_district") or ""
-                city = (
-                    addr.get("city")
-                    or addr.get("town")
-                    or addr.get("village")
-                    or addr.get("county")
-                    or addr.get("state")
-                    or ""
-                )
-                if road:
-                    parts.append(f"{road}, {house}".strip(", ") if house else road)
-                if city:
-                    parts.append(city)
-                return ", ".join(parts) if parts else f"геолокація ({lat:.5f}, {lng:.5f})"
+                address = data.get("display_name", "")
+                return clean_map_address(address) if address else f"геолокація ({lat:.5f}, {lng:.5f})"
     except Exception:
         return f"геолокація ({lat:.5f}, {lng:.5f})"
 
 
 def clean_map_address(address: str) -> str:
-    # Remove country, postal code, district noise
-    noise = re.compile(
-        r",?\s*(Україна|Ukraine|\d{5}|[\wЀ-ӿʼ'-]+ський район|[\wЀ-ӿʼ'-]+ська міська громада)\s*",
-        re.IGNORECASE,
-    )
-    address = noise.sub("", address)
+    address = re.sub(r",?\s*(Україна|Ukraine)\s*", "", address, flags=re.IGNORECASE)
+    address = re.sub(r",?\s*\d{5}\s*", "", address)
     address = re.sub(r"\s*,\s*,", ",", address)
-    address = address.strip(", ").strip()
-
-    # Keep only: first part (street+number), last part (city), drop middle noise
-    parts = [p.strip() for p in address.split(",") if p.strip()]
-    if len(parts) > 2:
-        parts = [parts[0], parts[-1]]
-    return ", ".join(parts)
+    return address.strip(", ").strip()
 
 
 def build_address_keyboard(mode: str, show_location: bool = True):
