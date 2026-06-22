@@ -300,7 +300,7 @@ async def get_orders_page(telegram_id: int, offset: int, limit: int = 5) -> list
     async with _db_pool.acquire() as conn:
         rows = await conn.fetch("""
         SELECT id,telegram_id,customer_name,service_type,cargo_name,custom_cargo_description,
-               loading_address,unloading_address,price,status,created_at
+               car_brand_model,loading_address,unloading_address,price,status,created_at
         FROM orders WHERE telegram_id=$1 ORDER BY id DESC LIMIT $2 OFFSET $3
         """, telegram_id, limit, offset)
     return [dict(r) for r in rows]
@@ -2878,6 +2878,9 @@ async def _render_orders_page(chat_id: int, user_id: int, state: FSMContext, off
         unloading = safe_text(order.get("unloading_address"))
         route = f"📍 {loading} → {unloading}" if (loading != "-" or unloading != "-") else "📍 не вказано"
 
+        cargo = safe_text(order.get("cargo_name"))
+        car_model = safe_text(order.get("car_brand_model"))
+
         status = order.get("status")
         if status == ORDER_STATUS_ACCEPTED:
             status_text = "✅ Прийнято в роботу"
@@ -2890,9 +2893,14 @@ async def _render_orders_page(chat_id: int, user_id: int, state: FSMContext, off
         else:
             status_text = f"🔄 {status}" if status else "🆕 Нове"
 
+        cargo_line = f"📦 {cargo}" if cargo != "-" else ""
+        if car_model != "-":
+            cargo_line += f"  •  {car_model}" if cargo_line else f"🚗 {car_model}"
+
         text = (
-            f"<b>{idx}.</b> 🚚 <b>#{order['id']}</b> — {service}\n"
-            f"{route}\n"
+            f"<b>#{order['id']}</b> — {service}\n"
+            + (f"{cargo_line}\n" if cargo_line else "")
+            + f"{route}\n"
             f"📊 {status_text}  🕒 {safe_text(order.get('created_at'))}"
         )
         if order.get("price"):
