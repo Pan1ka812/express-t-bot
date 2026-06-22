@@ -411,7 +411,6 @@ def _get_sheets_client() -> Optional[gspread.Client]:
     global _sheets_client
     credentials_json = os.getenv("GOOGLE_CREDENTIALS", "")
     if not credentials_json:
-        logging.warning("GOOGLE_CREDENTIALS env var is empty")
         return None
     if _sheets_client is None:
         try:
