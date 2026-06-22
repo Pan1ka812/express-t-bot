@@ -1243,14 +1243,20 @@ async def reverse_geocode(lat: float, lng: float) -> str:
 
 
 def clean_map_address(address: str) -> str:
-    # Remove country, postal code, known noise
+    # Remove country, postal code, district noise
     noise = re.compile(
         r",?\s*(Україна|Ukraine|\d{5}|[\wЀ-ӿʼ'-]+ський район|[\wЀ-ӿʼ'-]+ська міська громада)\s*",
         re.IGNORECASE,
     )
     address = noise.sub("", address)
     address = re.sub(r"\s*,\s*,", ",", address)
-    return address.strip(", ").strip()
+    address = address.strip(", ").strip()
+
+    # Keep only: first part (street+number), last part (city), drop middle noise
+    parts = [p.strip() for p in address.split(",") if p.strip()]
+    if len(parts) > 2:
+        parts = [parts[0], parts[-1]]
+    return ", ".join(parts)
 
 
 def build_address_keyboard(mode: str, show_location: bool = True):
