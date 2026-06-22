@@ -1347,8 +1347,9 @@ def build_client_summary(data: dict) -> str:
     if data.get("comment"):
         lines.append(f"<b>📝 Коментар:</b> {safe_text(data.get('comment'))}")
 
-    if data.get("photo_file_id"):
-        lines.append("<b>📷 Фото:</b> прикріплено")
+    photo_ids = data.get("photo_file_ids") or []
+    if photo_ids:
+        lines.append(f"<b>📷 Фото:</b> {len(photo_ids)} шт.")
 
     lines.append("")
     lines.append("<b>Підтверджуєте заявку?</b>")
@@ -2604,7 +2605,7 @@ async def process_comment_choice(message: Message, state: FSMContext):
     text = message.text or ""
 
     if text == "⏭️ Пропустити":
-        await state.update_data(comment="", photo_file_id=None)
+        await state.update_data(comment="", photo_file_ids=[])
         await ask_for_payer_with_price(message, state)
         return
 
@@ -2637,13 +2638,42 @@ async def process_photo(message: Message, state: FSMContext):
     if await deny_if_banned_message(message):
         return
 
-    if not message.photo:
-        await message.answer("Будь ласка, надішліть саме фото.")
+    text = message.text or ""
+
+    if text == "✅ Готово":
+        data = await state.get_data()
+        if not data.get("photo_file_ids"):
+            await message.answer("Ви ще не надіслали жодного фото. Надішліть фото або натисніть «Пропустити».")
+            return
+        await ask_for_payer_with_price(message, state)
         return
 
-    file_id = message.photo[-1].file_id
-    await state.update_data(photo_file_id=file_id, comment="")
-    await ask_for_payer_with_price(message, state)
+    if not message.photo:
+        await message.answer(
+            "Будь ласка, надішліть фото.",
+            reply_markup=build_reply_keyboard(["✅ Готово"], adjust=1),
+        )
+        return
+
+    data = await state.get_data()
+    photo_ids: list = list(data.get("photo_file_ids") or [])
+
+    if len(photo_ids) >= 4:
+        await message.answer("Максимум 4 фото. Натисніть «✅ Готово» щоб продовжити.")
+        return
+
+    photo_ids.append(message.photo[-1].file_id)
+    await state.update_data(photo_file_ids=photo_ids, comment="")
+
+    remaining = 4 - len(photo_ids)
+    if remaining > 0:
+        await message.answer(
+            f"📷 Фото {len(photo_ids)}/4 додано. Можете надіслати ще або завершити.",
+            reply_markup=build_reply_keyboard(["✅ Готово"], adjust=1),
+        )
+    else:
+        await message.answer("Досягнуто максимум 4 фото.")
+        await ask_for_payer_with_price(message, state)
 
 
 @router.message(Form.comment)
@@ -3144,16 +3174,15 @@ async def process_confirmation(message: Message, state: FSMContext):
             reply_markup=disp_kb.as_markup(),
         )
 
-        photo_file_id = data.get("photo_file_id")
-        if photo_file_id:
+        photo_ids = data.get("photo_file_ids") or []
+        if photo_ids:
             try:
-                await bot.send_photo(
-                    ADMIN_CHAT_ID,
-                    photo_file_id,
-                    caption=f"📷 Фото до заявки #{order_id}",
-                )
+                from aiogram.types import InputMediaPhoto
+                media = [InputMediaPhoto(media=fid) for fid in photo_ids]
+                media[0] = InputMediaPhoto(media=photo_ids[0], caption=f"📷 Фото до заявки #{order_id}")
+                await bot.send_media_group(ADMIN_CHAT_ID, media=media)
             except Exception:
-                logging.warning("Failed to send photo for order %s", order_id)
+                logging.warning("Failed to send photos for order %s", order_id)
 
         await restore_commands(user.id)
         await message.answer(
