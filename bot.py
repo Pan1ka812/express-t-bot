@@ -1232,7 +1232,14 @@ async def reverse_geocode(lat: float, lng: float) -> str:
                 road = addr.get("road") or addr.get("pedestrian") or addr.get("path") or ""
                 house = addr.get("house_number", "")
                 suburb = addr.get("suburb") or addr.get("neighbourhood") or addr.get("city_district") or ""
-                city = addr.get("city") or addr.get("town") or addr.get("village") or ""
+                city = (
+                    addr.get("city")
+                    or addr.get("town")
+                    or addr.get("village")
+                    or addr.get("county")
+                    or addr.get("state")
+                    or ""
+                )
                 if road:
                     parts.append(f"{road}, {house}".strip(", ") if house else road)
                 if city:
