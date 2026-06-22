@@ -1227,15 +1227,27 @@ async def reverse_geocode(lat: float, lng: float) -> str:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers={"User-Agent": "TelegramBot/1.0"}, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                 data = await resp.json()
-                address = data.get("display_name", "")
-                return clean_map_address(address) if address else f"геолокація ({lat:.5f}, {lng:.5f})"
+                addr = data.get("address", {})
+                parts = []
+                road = addr.get("road") or addr.get("pedestrian") or addr.get("path") or ""
+                house = addr.get("house_number", "")
+                suburb = addr.get("suburb") or addr.get("neighbourhood") or addr.get("city_district") or ""
+                if road:
+                    parts.append(f"{road}, {house}".strip(", ") if house else road)
+                if suburb:
+                    parts.append(suburb)
+                return ", ".join(parts) if parts else f"геолокація ({lat:.5f}, {lng:.5f})"
     except Exception:
         return f"геолокація ({lat:.5f}, {lng:.5f})"
 
 
 def clean_map_address(address: str) -> str:
-    address = re.sub(r",?\s*Україна\s*", "", address, flags=re.IGNORECASE)
-    address = re.sub(r",?\s*\d{5}\s*", "", address)
+    # Remove country, postal code, known noise
+    noise = re.compile(
+        r",?\s*(Україна|Ukraine|Київ|Kyiv|\d{5}|[А-ЯA-Z][а-яa-z]+ський район|[А-ЯA-Z][а-яa-z]+ська міська громада)\s*",
+        re.IGNORECASE,
+    )
+    address = noise.sub("", address)
     address = re.sub(r"\s*,\s*,", ",", address)
     return address.strip(", ").strip()
 
