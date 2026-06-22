@@ -406,6 +406,30 @@ SHEETS_HEADERS = [
 
 _sheets_client: Optional[gspread.Client] = None
 
+# chat_id -> last message_id that has inline keyboard (to remove buttons before sending new ones)
+_user_last_kb_msg: dict[int, int] = {}
+
+
+async def _clear_user_kb(chat_id: int) -> None:
+    msg_id = _user_last_kb_msg.pop(chat_id, None)
+    if msg_id:
+        try:
+            await bot.edit_message_reply_markup(chat_id=chat_id, message_id=msg_id, reply_markup=None)
+        except Exception:
+            pass
+
+
+async def _send_with_kb(chat_id: int, text: str, keyboard, parse_mode: str = "HTML") -> None:
+    await _clear_user_kb(chat_id)
+    msg = await bot.send_message(chat_id, text, parse_mode=parse_mode, reply_markup=keyboard)
+    _user_last_kb_msg[chat_id] = msg.message_id
+
+
+async def _send_photo_with_kb(chat_id: int, photo, caption: str, keyboard, parse_mode: str = "HTML") -> None:
+    await _clear_user_kb(chat_id)
+    msg = await bot.send_photo(chat_id, photo, caption=caption, parse_mode=parse_mode, reply_markup=keyboard)
+    _user_last_kb_msg[chat_id] = msg.message_id
+
 
 def _get_sheets_client() -> Optional[gspread.Client]:
     global _sheets_client
@@ -1487,18 +1511,14 @@ async def send_profile(message: Message, telegram_id: int):
     profile_banner = BASE_DIR / "profile_banner.jpg"
 
     if profile_banner.exists():
-        await message.answer_photo(
+        await _send_photo_with_kb(
+            message.chat.id,
             FSInputFile(str(profile_banner)),
             caption=text,
-            parse_mode="HTML",
-            reply_markup=get_profile_keyboard(),
+            keyboard=get_profile_keyboard(),
         )
     else:
-        await message.answer(
-            text,
-            parse_mode="HTML",
-            reply_markup=get_profile_keyboard(),
-        )
+        await _send_with_kb(message.chat.id, text, get_profile_keyboard())
 
 
 async def send_profile_to_chat(chat_id: int, telegram_id: int):
@@ -1511,15 +1531,9 @@ async def send_profile_to_chat(chat_id: int, telegram_id: int):
     profile_banner = BASE_DIR / "profile_banner.jpg"
 
     if profile_banner.exists():
-        await bot.send_photo(
-            chat_id,
-            FSInputFile(str(profile_banner)),
-            caption=text,
-            parse_mode="HTML",
-            reply_markup=get_profile_keyboard(),
-        )
+        await _send_photo_with_kb(chat_id, FSInputFile(str(profile_banner)), caption=text, keyboard=get_profile_keyboard())
     else:
-        await bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=get_profile_keyboard())
+        await _send_with_kb(chat_id, text, get_profile_keyboard())
 
 # =========================
 # COMMANDS
@@ -2804,11 +2818,13 @@ async def _render_orders_page(chat_id: int, user_id: int, state: FSMContext, off
     total = await count_user_orders(user_id)
 
     if total == 0:
+        await _clear_user_kb(chat_id)
         msg = await bot.send_message(
             chat_id,
             "📦 У вас поки що немає заявок через бота.",
             reply_markup=get_profile_keyboard(),
         )
+        _user_last_kb_msg[chat_id] = msg.message_id
         await state.update_data(history_msg_ids=[msg.message_id])
         await state.clear()
         return
@@ -3240,14 +3256,13 @@ async def disp_accept_callback(call: CallbackQuery):
     client_kb.adjust(1)
 
     try:
-        await bot.send_message(
+        await _send_with_kb(
             client_id,
             "✅ <b>Ваше замовлення прийнято в роботу!</b>\n\n"
             "Дякуємо, що скористалися нашим сервісом.\n"
             "Менеджер зателефонує вам найближчим часом.\n\n"
             "Бажаєте зробити нове замовлення?",
-            parse_mode="HTML",
-            reply_markup=client_kb.as_markup(),
+            client_kb.as_markup(),
         )
     except Exception:
         logging.warning("Could not notify client %s about accepted order %s", client_id, order_id)
@@ -3311,12 +3326,11 @@ async def disp_reason_callback(call: CallbackQuery):
     client_kb.adjust(1)
 
     try:
-        await bot.send_message(
-            client_id,
+        await _send_with_kb(
+            int(client_id),
             "Замовлення скасовано. Будемо раді допомогти наступного разу!\n\n"
             "Бажаєте зробити нове замовлення?",
-            parse_mode="HTML",
-            reply_markup=client_kb.as_markup(),
+            client_kb.as_markup(),
         )
     except Exception:
         logging.warning("Could not notify client %s about rejected order %s", client_id, order_id)
