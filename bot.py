@@ -2648,6 +2648,14 @@ async def process_photo(message: Message, state: FSMContext):
         await ask_for_payer_with_price(message, state)
         return
 
+    if text == "🗑 Очистити фото":
+        await state.update_data(photo_file_ids=[])
+        await message.answer(
+            "Фото видалено. Надішліть нове фото або натисніть «Пропустити».",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return
+
     if not message.photo:
         await message.answer(
             "Будь ласка, надішліть фото.",
@@ -2665,15 +2673,14 @@ async def process_photo(message: Message, state: FSMContext):
     photo_ids.append(message.photo[-1].file_id)
     await state.update_data(photo_file_ids=photo_ids, comment="")
 
-    remaining = 4 - len(photo_ids)
-    if remaining > 0:
-        await message.answer(
-            f"📷 Фото {len(photo_ids)}/4 додано. Можете надіслати ще або завершити.",
-            reply_markup=build_reply_keyboard(["✅ Готово"], adjust=1),
-        )
-    else:
+    if len(photo_ids) >= 4:
         await message.answer("Досягнуто максимум 4 фото.")
         await ask_for_payer_with_price(message, state)
+    else:
+        await message.answer(
+            f"📷 Фото {len(photo_ids)}/4 додано. Можете надіслати ще або завершити.",
+            reply_markup=build_reply_keyboard(["✅ Готово", "🗑 Очистити фото"], adjust=2),
+        )
 
 
 @router.message(Form.comment)
