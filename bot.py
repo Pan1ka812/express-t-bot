@@ -1847,11 +1847,8 @@ async def process_car_brand_model(message: Message, state: FSMContext):
         return
 
     text = (message.text or "").strip()
-    if not is_valid_car_brand_model(text):
-        await message.answer(
-            "Будь ласка, введіть марку та модель у зрозумілому форматі.\n"
-            "Наприклад: Toyota Camry, Mercedes Sprinter, Dodge RAM, Mitsubishi Lancer 10."
-        )
+    if not text:
+        await message.answer("Будь ласка, вкажіть марку та модель авто.")
         return
 
     await state.update_data(car_brand_model=text)
