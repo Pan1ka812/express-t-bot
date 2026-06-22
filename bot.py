@@ -707,27 +707,17 @@ def _update_order_in_sheets_sync(
             cell = sheet.find(str(order_id), in_column=1)
         except Exception:
             return
-        def col_to_letter(col: int) -> str:
-            result = ""
-            while col > 0:
-                col, rem = divmod(col - 1, 26)
-                result = chr(65 + rem) + result
-            return result
-
         row = cell.row
-        updates = []
-        for field, value in [
-            ("Статус", status),
-            ("Диспетчер", dispatcher_username),
-            ("Час відповіді диспетчера", responded_at),
-            ("Причина відмови", decline_reason),
-            ("Час реагування", response_time),
-        ]:
-            if value is not None:
-                col = SHEETS_HEADERS.index(field) + 1
-                updates.append({"range": f"{col_to_letter(col)}{row}", "values": [[value]]})
-        if updates:
-            sheet.batch_update(updates)
+        if status is not None:
+            sheet.update_cell(row, SHEETS_HEADERS.index("Статус") + 1, status)
+        if dispatcher_username is not None:
+            sheet.update_cell(row, SHEETS_HEADERS.index("Диспетчер") + 1, dispatcher_username)
+        if responded_at is not None:
+            sheet.update_cell(row, SHEETS_HEADERS.index("Час відповіді диспетчера") + 1, responded_at)
+        if decline_reason is not None:
+            sheet.update_cell(row, SHEETS_HEADERS.index("Причина відмови") + 1, decline_reason)
+        if response_time is not None:
+            sheet.update_cell(row, SHEETS_HEADERS.index("Час реагування") + 1, response_time)
     except Exception:
         logging.exception("Failed to update order in Google Sheets")
 
