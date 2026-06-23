@@ -107,7 +107,7 @@ ORDER_STATUS_IN_PROGRESS = "В обробці"
 ORDER_STATUS_ACCEPTED = "Прийнято в роботу"
 ORDER_STATUS_REJECTED = "Не прийнято"
 
-DECLINE_REASONS = ["Відмова клієнта", "Вже неактуально", "Дорого", "Некоректно"]
+DECLINE_REASONS = ["Відмова клієнта", "Вже неактуально", "Дорого", "Некоректно", "Прорахунок"]
 
 MANUAL_PHONE_INPUT_TEXT = "✍️ Ввести інший номер вручну"
 PAGE_SIZE = 5
