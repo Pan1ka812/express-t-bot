@@ -1211,8 +1211,18 @@ async def reverse_geocode(lat: float, lng: float) -> str:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers={"User-Agent": "TelegramBot/1.0"}, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                 data = await resp.json()
-                address = data.get("display_name", "")
-                return clean_map_address(address) if address else f"геолокація ({lat:.5f}, {lng:.5f})"
+                addr = data.get("address", {})
+                road = addr.get("road") or addr.get("pedestrian") or addr.get("path") or ""
+                house = addr.get("house_number", "")
+                city = (
+                    addr.get("city") or addr.get("town")
+                    or addr.get("village") or addr.get("county") or addr.get("state") or ""
+                )
+                street = f"{road}, {house}".strip(", ") if house else road
+                parts = [p for p in [city, street] if p]
+                base = ", ".join(parts) if parts else data.get("display_name", "")
+                base = clean_map_address(base)
+                return f"{base} ({lat:.5f}, {lng:.5f})" if base else f"геолокація ({lat:.5f}, {lng:.5f})"
     except Exception:
         return f"геолокація ({lat:.5f}, {lng:.5f})"
 
@@ -1222,6 +1232,18 @@ def clean_map_address(address: str) -> str:
     address = re.sub(r",?\s*\d{5}\s*", "", address)
     address = re.sub(r"\s*,\s*,", ",", address)
     return address.strip(", ").strip()
+
+
+def format_address_with_coords(address: str, lat, lng) -> str:
+    """Reorder address to city-first and append coords if available."""
+    if not lat or not lng:
+        return address
+    parts = [p.strip() for p in address.split(",") if p.strip()]
+    # move last part (city) to front if more than one part
+    if len(parts) > 1:
+        parts = [parts[-1]] + parts[:-1]
+    base = ", ".join(parts)
+    return f"{base} ({float(lat):.5f}, {float(lng):.5f})"
 
 
 def build_address_keyboard(mode: str, show_location: bool = True):
@@ -2076,9 +2098,9 @@ async def process_loading_address(message: Message, state: FSMContext):
     if message.web_app_data is not None:
         try:
             payload = json.loads(message.web_app_data.data)
-            address = clean_map_address(payload.get("address") or "")
             lat = payload.get("lat")
             lng = payload.get("lng")
+            address = format_address_with_coords(clean_map_address(payload.get("address") or ""), lat, lng)
         except Exception:
             await message.answer("Помилка даних з карти. Спробуйте ще раз.")
             return
@@ -2157,9 +2179,9 @@ async def process_unloading_address(message: Message, state: FSMContext):
     if message.web_app_data is not None:
         try:
             payload = json.loads(message.web_app_data.data)
-            address = clean_map_address(payload.get("address") or "")
             lat = payload.get("lat")
             lng = payload.get("lng")
+            address = format_address_with_coords(clean_map_address(payload.get("address") or ""), lat, lng)
         except Exception:
             await message.answer("Помилка даних з карти. Спробуйте ще раз.")
             return
