@@ -32,9 +32,7 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 
-# =========================
 # CONFIG
-# =========================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
 REVIEWS_CHAT_ID = int(os.getenv("REVIEWS_CHAT_ID", "0"))
@@ -54,9 +52,7 @@ dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
-# =========================
 # CONSTANTS
-# =========================
 SERVICE_TYPES = [
     "Евакуатор",
     "Гідравлічна платформа",
@@ -116,9 +112,7 @@ DECLINE_REASONS = ["Відмова клієнта", "Вже неактуальн
 MANUAL_PHONE_INPUT_TEXT = "✍️ Ввести інший номер вручну"
 PAGE_SIZE = 5
 
-# =========================
 # FSM
-# =========================
 class Form(StatesGroup):
     service_type = State()
     cargo_name = State()
@@ -149,9 +143,7 @@ class Form(StatesGroup):
     photo = State()
 
 
-# =========================
 # DATABASE (asyncpg / PostgreSQL)
-# =========================
 _db_pool: Optional[asyncpg.Pool] = None
 
 
@@ -390,9 +382,7 @@ async def set_user_note(telegram_id: int, note: str):
         )
 
 
-# =========================
 # GOOGLE SHEETS
-# =========================
 SHEETS_HEADERS = [
     "№ Замовлення", "Дата", "Ім'я клієнта", "Тел. замовника",
     "Тип послуги", "Вантаж / Авто", "Марка / Модель",
@@ -743,9 +733,7 @@ async def update_order_in_sheets(
         lambda: _update_order_in_sheets_sync(order_id, status, price, dispatcher_username, responded_at, decline_reason, response_time),
     )
 
-# =========================
 # BAN STORAGE
-# =========================
 def _load_banned_from_file() -> set[int]:
     if not BANNED_USERS_FILE.exists():
         return set()
@@ -798,9 +786,7 @@ async def deny_if_banned_callback(call: CallbackQuery) -> bool:
         return True
     return False
 
-# =========================
 # CHAT HELPERS
-# =========================
 def is_private_chat_message(message: Message) -> bool:
     return message.chat.type == "private"
 
@@ -902,9 +888,7 @@ async def replace_callback_message(
             )
         except Exception:
             pass
-# =========================
 # HELPERS / VALIDATORS
-# =========================
 def safe_text(value: Optional[str], default: str = "-") -> str:
     if value is None:
         return default
@@ -1499,9 +1483,7 @@ async def restore_commands(user_id: int):
         pass
 
 
-# =========================
 # PROFILE RENDER
-# =========================
 async def send_profile(message: Message, telegram_id: int):
     profile = await get_user_profile(telegram_id)
     if profile is None:
@@ -1536,9 +1518,7 @@ async def send_profile_to_chat(chat_id: int, telegram_id: int):
     else:
         await _send_with_kb(chat_id, text, get_profile_keyboard())
 
-# =========================
 # COMMANDS
-# =========================
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     if await deny_if_not_private_message(message):
@@ -1646,9 +1626,7 @@ async def cmd_order(message: Message, state: FSMContext):
     )
     await state.set_state(Form.customer_name)
 
-# =========================
 # ADMIN COMMANDS
-# =========================
 @router.message(Command("ban"))
 async def ban_user_command(message: Message):
     if not is_admin_chat_message(message):
@@ -1748,9 +1726,7 @@ async def setnote_command(message: Message):
     await set_user_note(user_id, note)
     await message.answer(f"📝 Клієнту {user_id} оновлено примітку.")
 
-# =========================
 # ORDER FLOW
-# =========================
 @router.message(Form.service_type)
 async def process_service_type(message: Message, state: FSMContext):
     if await deny_if_not_private_message(message):
@@ -2666,19 +2642,19 @@ async def process_photo(message: Message, state: FSMContext):
     data = await state.get_data()
     photo_ids: list = list(data.get("photo_file_ids") or [])
 
-    if len(photo_ids) >= 4:
-        await message.answer("Максимум 4 фото. Натисніть «✅ Готово» щоб продовжити.")
+    if len(photo_ids) >= 5:
+        await message.answer("Максимум 5 фото. Натисніть «✅ Готово» щоб продовжити.")
         return
 
     photo_ids.append(message.photo[-1].file_id)
     await state.update_data(photo_file_ids=photo_ids, comment="")
 
-    if len(photo_ids) >= 4:
-        await message.answer("Досягнуто максимум 4 фото.")
+    if len(photo_ids) >= 5:
+        await message.answer("Досягнуто максимум 5 фото.")
         await ask_for_payer_with_price(message, state)
     else:
         await message.answer(
-            f"📷 Фото {len(photo_ids)}/4 додано. Можете надіслати ще або завершити.",
+            f"📷 Фото {len(photo_ids)}/5 додано. Можете надіслати ще або завершити.",
             reply_markup=build_reply_keyboard(["✅ Готово", "🗑 Очистити фото"], adjust=2),
         )
 
@@ -2702,9 +2678,7 @@ async def process_comment(message: Message, state: FSMContext):
     await state.update_data(comment=text)
     await ask_for_payer_with_price(message, state)
 
-# =========================
 # EDIT FLOW
-# =========================
 @router.callback_query(lambda c: c.data == "edit_main")
 async def edit_main_callback(call: CallbackQuery, state: FSMContext):
     if await deny_if_not_private_callback(call):
@@ -2825,9 +2799,7 @@ async def edit_field_callback(call: CallbackQuery, state: FSMContext):
         )
         return
 
-# =========================
 # PROFILE CALLBACKS
-# =========================
 async def _delete_history_messages(chat_id: int, state: FSMContext):
     data = await state.get_data()
     for msg_id in data.get("history_msg_ids", []):
@@ -3105,9 +3077,7 @@ async def history_back_to_profile_callback(call: CallbackQuery, state: FSMContex
 
     await send_profile_to_chat(chat_id, user.id)
 
-# =========================
 # FINAL CONFIRMATION
-# =========================
 async def show_confirmation(message: Message, state: FSMContext):
     data = await state.get_data()
     summary = build_client_summary(data)
@@ -3233,9 +3203,7 @@ async def process_confirmation(message: Message, state: FSMContext):
 
     await message.answer("Будь ласка, використовуйте кнопки для підтвердження.")
 
-# =========================
 # DISPATCHER FLOW
-# =========================
 @router.callback_query(lambda c: c.data and c.data.startswith("disp_take:"))
 async def disp_take_callback(call: CallbackQuery):
     await call.answer()
@@ -3395,9 +3363,7 @@ async def client_go_profile_callback(call: CallbackQuery):
         return
     await send_profile_to_chat(call.message.chat.id, user.id)
 
-# =========================
 # MAIN
-# =========================
 if __name__ == "__main__":
     if BOT_TOKEN == "PASTE_NEW_BOT_TOKEN_HERE":
         print("Вкажіть новий BOT_TOKEN у коді або через змінну середовища BOT_TOKEN.")
