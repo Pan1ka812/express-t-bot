@@ -389,7 +389,7 @@ SHEETS_HEADERS = [
     "Габарити", "Вага", "Терміновість", "Дата перевезення", "Час",
     "Адреса завантаження", "Адреса розвантаження",
     "Тел. завантаження", "Тел. розвантаження",
-    "Платник", "Деталі платника", "Коментар",
+    "Спосіб оплати", "Деталі оплати", "Коментар",
     "Статус", "Telegram ID", "Username",
     "Час відправки в групу", "Диспетчер", "Час відповіді диспетчера", "Причина відмови", "Час реагування",
 ]
@@ -1345,7 +1345,7 @@ def build_client_summary(data: dict) -> str:
         f"<b>📞 Тел. розвантаження:</b> {safe_text(data.get('unloading_phone'))}",
     ])
 
-    payer_line = f"<b>💰 Платник:</b> {safe_text(data.get('payer_type'))}"
+    payer_line = f"<b>💰 Спосіб оплати:</b> {safe_text(data.get('payer_type'))}"
     if data.get("payer_type") == "БН" and data.get("payer_details"):
         payer_line += f" - {safe_text(data.get('payer_details'))}"
     lines.append(payer_line)
@@ -1401,7 +1401,7 @@ def build_admin_summary(user: types.User, data: dict, order_id: int, profile: Op
         lines.append(f"<b>📅 Дата:</b> {safe_text(data.get('scheduled_date'))}")
         lines.append(f"<b>🕐 Час:</b> {safe_text(data.get('scheduled_time'))}")
 
-    payer_line = f"<b>💰 Платник:</b> {safe_text(data.get('payer_type'))}"
+    payer_line = f"<b>💰 Спосіб оплати:</b> {safe_text(data.get('payer_type'))}"
     if data.get("payer_type") == "БН" and data.get("payer_details"):
         payer_line += f" - {safe_text(data.get('payer_details'))}"
     lines.append(payer_line)
@@ -2100,7 +2100,10 @@ async def process_loading_address(message: Message, state: FSMContext):
             payload = json.loads(message.web_app_data.data)
             lat = payload.get("lat")
             lng = payload.get("lng")
-            address = format_address_with_coords(clean_map_address(payload.get("address") or ""), lat, lng)
+            if lat and lng:
+                address = await reverse_geocode(float(lat), float(lng))
+            else:
+                address = clean_map_address(payload.get("address") or "")
         except Exception:
             await message.answer("Помилка даних з карти. Спробуйте ще раз.")
             return
@@ -2181,7 +2184,10 @@ async def process_unloading_address(message: Message, state: FSMContext):
             payload = json.loads(message.web_app_data.data)
             lat = payload.get("lat")
             lng = payload.get("lng")
-            address = format_address_with_coords(clean_map_address(payload.get("address") or ""), lat, lng)
+            if lat and lng:
+                address = await reverse_geocode(float(lat), float(lng))
+            else:
+                address = clean_map_address(payload.get("address") or "")
         except Exception:
             await message.answer("Помилка даних з карти. Спробуйте ще раз.")
             return
@@ -2563,7 +2569,7 @@ async def process_payer_type(message: Message, state: FSMContext):
         await state.set_state(Form.payer_details)
         return
 
-    await message.answer("Будь ласка, оберіть тип платника, використовуючи кнопки.")
+    await message.answer("Будь ласка, оберіть спосіб оплати, використовуючи кнопки.")
 
 
 @router.message(Form.payer_details)
