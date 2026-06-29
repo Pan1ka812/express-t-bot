@@ -1210,9 +1210,7 @@ def is_valid_customer_name(text: str) -> bool:
 
 
 def needs_dimensions(service_type: str, cargo_name: str) -> bool:
-    if service_type == "Вантажні перевезення":
-        return True
-    return cargo_name == "Інше"
+    return service_type == "Вантажні перевезення"
 
 
 def build_reply_keyboard(options: list[str], adjust: int = 2):
@@ -1864,10 +1862,10 @@ async def process_custom_cargo_description(message: Message, state: FSMContext):
         return
 
     await message.answer(
-        "Вкажіть габаритні розміри (Д*Ш*В, м):",
-        reply_markup=ReplyKeyboardRemove(),
+        "На коли потрібно перевезення?",
+        reply_markup=build_reply_keyboard(URGENCY_TYPES),
     )
-    await state.set_state(Form.dimensions)
+    await state.set_state(Form.urgency_type)
 
 
 @router.message(Form.car_brand_model)
