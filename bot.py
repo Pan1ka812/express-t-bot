@@ -3511,12 +3511,12 @@ async def disp_note_callback(call: CallbackQuery):
     msg_id = int(parts[2]) if len(parts) > 2 else None
 
     if msg_id:
-        _waiting_note[call.message.chat.id] = (client_id, msg_id)
+        _pending_note[msg_id] = client_id
         try:
             await bot.edit_message_text(
                 chat_id=call.message.chat.id,
                 message_id=msg_id,
-                text="📝 Введіть нотатку наступним повідомленням:",
+                text="📝 Введіть нотатку — відповідайте (reply) на це повідомлення:",
                 reply_markup=None,
             )
         except Exception:
@@ -3532,27 +3532,27 @@ async def disp_profile_close_callback(call: CallbackQuery):
         await _delete_profile_msg(call.message.chat.id, msg_id)
 
 
-@router.message(lambda m: m.chat.id == ADMIN_CHAT_ID and m.text and not m.text.startswith("/"))
-async def disp_note_text_handler(message: Message):
-    entry = _waiting_note.pop(message.chat.id, None)
-    if entry is None:
+@router.message(lambda m: m.chat.id == ADMIN_CHAT_ID and m.reply_to_message is not None)
+async def disp_note_reply_handler(message: Message):
+    replied_id = message.reply_to_message.message_id
+    client_id = _pending_note.pop(replied_id, None)
+    if client_id is None:
         return
 
-    client_id, profile_msg_id = entry
     note = (message.text or "").strip()
     if not note:
         return
 
     await set_user_note(client_id, note)
     try:
-        await bot.delete_message(chat_id=message.chat.id, message_id=profile_msg_id)
+        await bot.delete_message(chat_id=message.chat.id, message_id=replied_id)
     except Exception:
         pass
     try:
         await message.delete()
     except Exception:
         pass
-    await message.answer(f"📝 Нотатку збережено.")
+    await message.answer("📝 Нотатку збережено.")
 
 
 # запуск
