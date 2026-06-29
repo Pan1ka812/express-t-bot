@@ -414,6 +414,9 @@ _user_last_kb_msg: dict[int, int] = {}
 # profile_msg_id -> client_id (for note input tracking in dispatcher chat)
 _pending_note: dict[int, int] = {}
 
+# admin chat_id -> (client_id, profile_msg_id) waiting for note text
+_waiting_note: dict[int, tuple[int, int]] = {}
+
 
 async def _clear_user_kb(chat_id: int) -> None:
     msg_id = _user_last_kb_msg.pop(chat_id, None)
@@ -3508,12 +3511,12 @@ async def disp_note_callback(call: CallbackQuery):
     msg_id = int(parts[2]) if len(parts) > 2 else None
 
     if msg_id:
-        _pending_note[msg_id] = client_id
+        _waiting_note[call.message.chat.id] = (client_id, msg_id)
         try:
             await bot.edit_message_text(
                 chat_id=call.message.chat.id,
                 message_id=msg_id,
-                text="📝 Введіть нотатку — надішліть її як відповідь на це повідомлення:",
+                text="📝 Введіть нотатку наступним повідомленням:",
                 reply_markup=None,
             )
         except Exception:
@@ -3529,27 +3532,27 @@ async def disp_profile_close_callback(call: CallbackQuery):
         await _delete_profile_msg(call.message.chat.id, msg_id)
 
 
-@router.message(lambda m: m.chat.id == ADMIN_CHAT_ID and m.reply_to_message is not None)
-async def disp_note_reply_handler(message: Message):
-    replied_id = message.reply_to_message.message_id
-    client_id = _pending_note.pop(replied_id, None)
-    if client_id is None:
+@router.message(lambda m: m.chat.id == ADMIN_CHAT_ID and m.text and not m.text.startswith("/"))
+async def disp_note_text_handler(message: Message):
+    entry = _waiting_note.pop(message.chat.id, None)
+    if entry is None:
         return
 
+    client_id, profile_msg_id = entry
     note = (message.text or "").strip()
     if not note:
         return
 
     await set_user_note(client_id, note)
     try:
-        await bot.delete_message(chat_id=message.chat.id, message_id=replied_id)
+        await bot.delete_message(chat_id=message.chat.id, message_id=profile_msg_id)
     except Exception:
         pass
     try:
         await message.delete()
     except Exception:
         pass
-    await message.answer(f"📝 Нотатку збережено для клієнта {client_id}.")
+    await message.answer(f"📝 Нотатку збережено.")
 
 
 # запуск
