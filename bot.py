@@ -1927,46 +1927,8 @@ async def process_dimensions(message: Message, state: FSMContext):
         await show_confirmation(message, state)
         return
 
-    height = extract_height(normalized)
-    if height is not None and height > 3:
-        await message.answer(
-            "🚨 <b>Негабарит!</b> Висота вантажу більше 3 м. Для такого вантажу потрібен супровід. Чи забезпечуєте супровід?",
-            reply_markup=build_reply_keyboard(["Супроводжуємо", "Не супроводжуємо"]),
-            parse_mode="HTML",
-        )
-        await state.set_state(Form.oversize_support)
-        return
-
     await message.answer("Вкажіть вагу (т):", reply_markup=ReplyKeyboardRemove())
     await state.set_state(Form.weight)
-
-
-@router.message(Form.oversize_support)
-async def process_oversize_support(message: Message, state: FSMContext):
-    if await deny_if_not_private_message(message):
-        return
-    if await deny_if_banned_message(message):
-        return
-
-    text = message.text or ""
-
-    if text == "Супроводжуємо":
-        await state.update_data(support_required="потрібен")
-        await message.answer("Вкажіть вагу (т):", reply_markup=ReplyKeyboardRemove())
-        await state.set_state(Form.weight)
-        return
-
-    if text == "Не супроводжуємо":
-        await restore_commands(message.from_user.id)
-        await message.answer(
-            "❌ На жаль, ми не можемо виконати перевезення без супроводу для негабаритного вантажу.\n\n"
-            "Якщо бажаєте оформити нову заявку — натисніть /order",
-            reply_markup=ReplyKeyboardRemove(),
-        )
-        await state.clear()
-        return
-
-    await message.answer("Будь ласка, використовуйте кнопки.")
 
 
 @router.message(Form.weight)
