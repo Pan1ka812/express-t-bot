@@ -2542,17 +2542,6 @@ async def ask_for_payer_with_price(message: Message, state: FSMContext):
     service_type = data.get("service_type", "")
     car_type = data.get("cargo_name", "")
 
-    dispatch_price, km_price = await read_prices(service_type, car_type)
-
-    if dispatch_price or km_price:
-        parts = [f"💰 <b>Орієнтовні ціни для вашого замовлення:</b>"]
-        if dispatch_price:
-            parts.append(f"• Подача: від <b>{dispatch_price} грн</b>")
-        if km_price:
-            parts.append(f"• Ціна км: від <b>{km_price} грн/км</b>")
-        parts.append("")
-        await message.answer("\n".join(parts), parse_mode="HTML")
-
     await message.answer(
         "Оберіть спосіб оплати:",
         reply_markup=build_reply_keyboard(PAYER_TYPES),
@@ -3125,6 +3114,15 @@ async def show_confirmation(message: Message, state: FSMContext):
     data = await state.get_data()
     summary = build_client_summary(data)
 
+    dispatch_price, km_price = await read_prices(data.get("service_type", ""), data.get("cargo_name", ""))
+    if dispatch_price or km_price:
+        price_lines = ["\n💰 <b>Орієнтовна вартість:</b>"]
+        if dispatch_price:
+            price_lines.append(f"• Подача: від <b>{dispatch_price} грн</b>")
+        if km_price:
+            price_lines.append(f"• Ціна км: від <b>{km_price} грн/км</b>")
+        summary += "\n" + "\n".join(price_lines)
+
     confirm_kb = ReplyKeyboardBuilder()
     confirm_kb.add(KeyboardButton(text="✅ Підтвердити"))
     confirm_kb.add(KeyboardButton(text="❌ Скасувати"))
@@ -3137,7 +3135,7 @@ async def show_confirmation(message: Message, state: FSMContext):
     )
     await state.update_data(summary_msg_id=summary_msg.message_id)
     await message.answer(
-        "Використовуйте кнопки нижче для підтвердження.",
+        "Підтверджуєте замовлення?",
         reply_markup=confirm_kb.as_markup(resize_keyboard=True),
     )
     await state.set_state(Form.confirmation)
