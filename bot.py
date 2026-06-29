@@ -40,6 +40,7 @@ SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 GOOGLE_SPREADSHEET_ID = os.getenv("GOOGLE_SPREADSHEET_ID", "")
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS", "")
+COMPANY_NAME = os.getenv("COMPANY_NAME", "Express T")
 
 BASE_DIR = Path(__file__).resolve().parent
 BANNED_USERS_FILE = BASE_DIR / "banned_users.json"
@@ -554,7 +555,7 @@ async def setup_sheets():
 
 PRICE_SERVICES = ["Евакуатор", "Гідравлічна платформа", "Кран-маніпулятор", "Вантажні перевезення"]
 PRICE_CAR_TYPES = ["Легковий", "Джип", "Мікроавтобус", "Автобус", "Вантажний авто", "Інше"]
-PRICE_SHEET_NAME = "Ціни"
+PRICE_SHEET_NAME = os.getenv("PRICES_SHEET_NAME", "Ціни")
 
 
 def _setup_price_sheet_sync():
@@ -1388,7 +1389,7 @@ def build_admin_summary(user: types.User, data: dict, order_id: int, profile: Op
     note = profile["note"] if profile else ""
 
     lines = [
-        f"<b>🚨 НОВА ЗАЯВКА #{order_id}</b>",
+        f"<b>🚨 НОВА ЗАЯВКА #{order_id}</b>  <i>({COMPANY_NAME})</i>",
         "",
         f"<b>👤 Клієнт:</b> {safe_text(data.get('customer_name') or user.full_name, 'Не вказано')}",
         f"<b>📞 Тел. замовника:</b> {safe_text(data.get('client_phone'))}",
