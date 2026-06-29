@@ -382,6 +382,18 @@ async def set_user_note(telegram_id: int, note: str):
         )
 
 
+async def get_client_order_stats(telegram_id: int) -> dict:
+    async with _db_pool.acquire() as conn:
+        total = await conn.fetchval("SELECT COUNT(*) FROM orders WHERE telegram_id=$1", telegram_id) or 0
+        accepted = await conn.fetchval(
+            "SELECT COUNT(*) FROM orders WHERE telegram_id=$1 AND status=$2", telegram_id, ORDER_STATUS_ACCEPTED
+        ) or 0
+        rejected = await conn.fetchval(
+            "SELECT COUNT(*) FROM orders WHERE telegram_id=$1 AND status=$2", telegram_id, ORDER_STATUS_REJECTED
+        ) or 0
+    return {"total": total, "accepted": accepted, "rejected": rejected}
+
+
 # гугл таблиця
 SHEETS_HEADERS = [
     "№ Замовлення", "Дата", "Ім'я клієнта", "Тел. замовника",
@@ -398,6 +410,9 @@ _sheets_client: Optional[gspread.Client] = None
 
 # chat_id -> last message_id that has inline keyboard (to remove buttons before sending new ones)
 _user_last_kb_msg: dict[int, int] = {}
+
+# profile_msg_id -> client_id (for note input tracking in dispatcher chat)
+_pending_note: dict[int, int] = {}
 
 
 async def _clear_user_kb(chat_id: int) -> None:
@@ -3177,7 +3192,11 @@ async def process_confirmation(message: Message, state: FSMContext):
             text="🔄 Взяти в обробку",
             callback_data=f"disp_take:{order_id}:{user.id}",
         ))
-        disp_kb.adjust(1)
+        disp_kb.add(InlineKeyboardButton(
+            text="👤 Профіль",
+            callback_data=f"disp_profile:{user.id}",
+        ))
+        disp_kb.adjust(2)
 
         order_msg = await bot.send_message(
             ADMIN_CHAT_ID,
@@ -3390,6 +3409,150 @@ async def client_go_profile_callback(call: CallbackQuery):
     if user is None:
         return
     await send_profile_to_chat(call.message.chat.id, user.id)
+
+# dispatcher client profile
+@router.callback_query(lambda c: c.data and c.data.startswith("disp_profile:"))
+async def disp_profile_callback(call: CallbackQuery):
+    await call.answer()
+    client_id = int(call.data.split(":")[1])
+
+    profile = await get_user_profile(client_id)
+    stats = await get_client_order_stats(client_id)
+    banned = is_user_banned(client_id)
+
+    name = profile.get("customer_name") or profile.get("telegram_full_name") or "—" if profile else "—"
+    phone = profile.get("phone") or "—" if profile else "—"
+    username = f"@{profile.get('telegram_username')}" if profile and profile.get("telegram_username") else "немає"
+    note = profile.get("note") or "—" if profile else "—"
+    ban_status = "🚫 Забанений" if banned else "✅ Активний"
+
+    text = (
+        f"👤 <b>Профіль клієнта</b>\n\n"
+        f"<b>Ім'я:</b> {html.escape(name)}\n"
+        f"<b>Телефон:</b> {html.escape(phone)}\n"
+        f"<b>Username:</b> {html.escape(username)}\n"
+        f"<b>Статус:</b> {ban_status}\n\n"
+        f"<b>Всього замовлень:</b> {stats['total']}\n"
+        f"<b>Успішних:</b> {stats['accepted']}\n"
+        f"<b>Відхилених:</b> {stats['rejected']}\n\n"
+        f"<b>Нотатка:</b> {html.escape(note)}"
+    )
+
+    kb = InlineKeyboardBuilder()
+    if banned:
+        kb.add(InlineKeyboardButton(text="✅ Розбанити", callback_data=f"disp_unban:{client_id}"))
+    else:
+        kb.add(InlineKeyboardButton(text="🚫 Забанити", callback_data=f"disp_ban:{client_id}"))
+    kb.add(InlineKeyboardButton(text="📝 Нотатка", callback_data=f"disp_note:{client_id}"))
+    kb.add(InlineKeyboardButton(text="✖️ Закрити", callback_data="disp_profile_close"))
+    kb.adjust(2)
+
+    msg = await call.message.answer(text, parse_mode="HTML", reply_markup=kb.as_markup())
+    # store msg_id in buttons so handlers know what to delete
+    kb2 = InlineKeyboardBuilder()
+    if banned:
+        kb2.add(InlineKeyboardButton(text="✅ Розбанити", callback_data=f"disp_unban:{client_id}:{msg.message_id}"))
+    else:
+        kb2.add(InlineKeyboardButton(text="🚫 Забанити", callback_data=f"disp_ban:{client_id}:{msg.message_id}"))
+    kb2.add(InlineKeyboardButton(text="📝 Нотатка", callback_data=f"disp_note:{client_id}:{msg.message_id}"))
+    kb2.add(InlineKeyboardButton(text="✖️ Закрити", callback_data=f"disp_profile_close:{msg.message_id}"))
+    kb2.adjust(2)
+    try:
+        await bot.edit_message_reply_markup(chat_id=call.message.chat.id, message_id=msg.message_id, reply_markup=kb2.as_markup())
+    except Exception:
+        pass
+
+
+async def _delete_profile_msg(chat_id: int, msg_id: int):
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+    except Exception:
+        pass
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("disp_ban:"))
+async def disp_ban_callback(call: CallbackQuery):
+    await call.answer()
+    parts = call.data.split(":")
+    client_id = int(parts[1])
+    msg_id = int(parts[2]) if len(parts) > 2 else None
+
+    banned = load_banned_users()
+    banned.add(client_id)
+    save_banned_users(banned)
+
+    if msg_id:
+        await _delete_profile_msg(call.message.chat.id, msg_id)
+    await call.message.answer(f"🚫 Клієнт {client_id} забанений.")
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("disp_unban:"))
+async def disp_unban_callback(call: CallbackQuery):
+    await call.answer()
+    parts = call.data.split(":")
+    client_id = int(parts[1])
+    msg_id = int(parts[2]) if len(parts) > 2 else None
+
+    banned = load_banned_users()
+    banned.discard(client_id)
+    save_banned_users(banned)
+
+    if msg_id:
+        await _delete_profile_msg(call.message.chat.id, msg_id)
+    await call.message.answer(f"✅ Клієнт {client_id} розбанений.")
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("disp_note:"))
+async def disp_note_callback(call: CallbackQuery):
+    await call.answer()
+    parts = call.data.split(":")
+    client_id = int(parts[1])
+    msg_id = int(parts[2]) if len(parts) > 2 else None
+
+    if msg_id:
+        _pending_note[msg_id] = client_id
+        try:
+            await bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=msg_id,
+                text="📝 Введіть нотатку — надішліть її як відповідь на це повідомлення:",
+                reply_markup=None,
+            )
+        except Exception:
+            pass
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("disp_profile_close:"))
+async def disp_profile_close_callback(call: CallbackQuery):
+    await call.answer()
+    parts = call.data.split(":")
+    msg_id = int(parts[1]) if len(parts) > 1 else None
+    if msg_id:
+        await _delete_profile_msg(call.message.chat.id, msg_id)
+
+
+@router.message(lambda m: m.chat.id == ADMIN_CHAT_ID and m.reply_to_message is not None)
+async def disp_note_reply_handler(message: Message):
+    replied_id = message.reply_to_message.message_id
+    client_id = _pending_note.pop(replied_id, None)
+    if client_id is None:
+        return
+
+    note = (message.text or "").strip()
+    if not note:
+        return
+
+    await set_user_note(client_id, note)
+    try:
+        await bot.delete_message(chat_id=message.chat.id, message_id=replied_id)
+    except Exception:
+        pass
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    await message.answer(f"📝 Нотатку збережено для клієнта {client_id}.")
+
 
 # запуск
 if __name__ == "__main__":
