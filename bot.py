@@ -405,6 +405,7 @@ SHEETS_HEADERS = [
     "Спосіб оплати", "Деталі оплати", "Коментар",
     "Статус", "Telegram ID", "Username",
     "Час відправки в групу", "Диспетчер", "Час відповіді диспетчера", "Причина відмови", "Час реагування",
+    "Компанія",
 ]
 
 _sheets_client: Optional[gspread.Client] = None
@@ -694,6 +695,7 @@ def _write_order_to_sheets_sync(order_id: int, user: types.User, data: dict, pro
             "",       # Час відповіді диспетчера
             "",       # Причина відмови
             "",       # Час реагування
+            COMPANY_NAME,
         ])
     except Exception:
         logging.exception("Failed to write order to Google Sheets")
